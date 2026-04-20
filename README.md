@@ -186,7 +186,7 @@ RISK:EMERGENCY
 
 ## 🛠 Tech Stack
 
-* Android (Java)
+* Android (Kotlin)
 * ESP32 (?)
 * BLE (GATT 기반 통신)
 * Sensor Fusion
