@@ -5,6 +5,8 @@ import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanRecord
 import android.bluetooth.le.ScanResult
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothStatusCodes
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -38,8 +40,10 @@ class MainActivity : AppCompatActivity() {
     private var bluetoothGatt: BluetoothGatt? = null
 
     // 마지막으로 ESP32에 전송한 위험도 명령
-    // 같은 명령을 반복 전송하지 않기 위해 사용
     private var lastSentRiskCommand: String? = null
+
+    // 마지막으로 Alert를 띄운 위험 단계
+    private var lastAlertRiskLevel: RiskLevel? = null
 
     private lateinit var alertManager: AlertManager
 
@@ -239,11 +243,15 @@ class MainActivity : AppCompatActivity() {
                         txtBleState.text = "BLE 연결 해제"
                         txtConnectedDevice.text = "연결 장치 : 없음"
 
-                        // 연결이 끊기면 마지막 전송 명령 초기화
-                        // 재연결 후 같은 위험 단계라도 다시 ESP32에 명령을 보낼 수 있게 함
+                        // 연결이 끊기면 중복 방지 상태 초기화
                         lastSentRiskCommand = null
+                        lastAlertRiskLevel = null
 
-                        Toast.makeText(this@MainActivity, "장치 연결 해제", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            this@MainActivity,
+                            "장치 연결 해제",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
                 }
             }
@@ -339,8 +347,14 @@ class MainActivity : AppCompatActivity() {
         updateSensorUI(sensorData, riskLevel)
         updateRiskUI(riskLevel)
 
+        // ESP32 Write 중복 방지는 sendRiskCommandToEsp32() 내부에서 처리
         sendRiskCommandToEsp32(command)
-        alertManager.handleRisk(riskLevel)
+
+        // Alert는 위험 단계가 바뀐 경우에만 실행
+        if (riskLevel != lastAlertRiskLevel) {
+            alertManager.handleRisk(riskLevel)
+            lastAlertRiskLevel = riskLevel
+        }
     }
 
     private fun updateSensorUI(
@@ -398,14 +412,21 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val targetService = gatt.getService(BleConstants.TARGET_SERVICE_UUID) ?: return
+        val targetService = gatt.getService(BleConstants.TARGET_SERVICE_UUID)
+        if (targetService == null) {
+            return
+        }
 
         val controlCharacteristic =
-            targetService.getCharacteristic(BleConstants.CONTROL_CHARACTERISTIC_UUID) ?: return
+            targetService.getCharacteristic(BleConstants.CONTROL_CHARACTERISTIC_UUID)
+
+        if (controlCharacteristic == null) {
+            return
+        }
 
         val sendData = command.toByteArray(StandardCharsets.UTF_8)
 
-        val writeResult: Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val writeStarted: Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val result = gatt.writeCharacteristic(
                 controlCharacteristic,
                 sendData,
@@ -421,8 +442,8 @@ class MainActivity : AppCompatActivity() {
             gatt.writeCharacteristic(controlCharacteristic)
         }
 
-        // 실제 write 요청이 성공적으로 시작된 경우에만 마지막 명령 갱신
-        if (writeResult) {
+        // Write 요청이 정상적으로 시작된 경우에만 마지막 명령 저장
+        if (writeStarted) {
             lastSentRiskCommand = command
         }
     }
