@@ -199,8 +199,12 @@ class MainActivity : AppCompatActivity() {
             isScanning &&
             BlePermissionHelper.hasScanPermission(this)
         ) {
-            bluetoothLeScanner?.stopScan(scanCallback)
-            Log.d(TAG, "BLE scan stopped")
+            try {
+                bluetoothLeScanner?.stopScan(scanCallback)
+                Log.d(TAG, "BLE scan stopped")
+            } catch (e: SecurityException) {
+                Log.e(TAG, "stopScan failed by permission", e)
+            }
         }
 
         isScanning = false
@@ -221,24 +225,36 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) {
-                Log.e(TAG, "Missing BLUETOOTH_CONNECT permission while reading scan result")
+                Log.e(TAG, "Missing BLUETOOTH_CONNECT permission while reading device info")
                 return
             }
 
-            val deviceName = device.name?.takeIf { it.isNotBlank() } ?: "이름 없는 기기"
+            val deviceName = try {
+                device.name?.takeIf { it.isNotBlank() } ?: "이름 없는 기기"
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Cannot read device name", e)
+                "이름 없는 기기"
+            }
 
-            if (foundDeviceList.any { it.address == device.address }) {
-                Log.d(TAG, "Duplicate device ignored: $deviceName / ${device.address}")
+            val deviceAddress = try {
+                device.address
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Cannot read device address", e)
                 return
             }
 
-            val deviceInfo = "이름 : $deviceName\n주소 : ${device.address}"
+            if (foundDeviceList.any { it.address == deviceAddress }) {
+                Log.d(TAG, "Duplicate device ignored: $deviceName / $deviceAddress")
+                return
+            }
+
+            val deviceInfo = "이름 : $deviceName\n주소 : $deviceAddress"
 
             foundDeviceList.add(device)
             deviceInfoList.add(deviceInfo)
             deviceAdapter.notifyDataSetChanged()
 
-            Log.d(TAG, "Target BLE device found: $deviceName / ${device.address}")
+            Log.d(TAG, "Target BLE device found: $deviceName / $deviceAddress")
         }
 
         override fun onScanFailed(errorCode: Int) {
@@ -268,20 +284,32 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        val deviceAddress = try {
+            device.address
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Cannot read device address", e)
+            Toast.makeText(this, "BLE 장치 정보를 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         resetBleStateFlags()
 
         lastConnectedDevice = device
-        connectedDeviceAddress = device.address
+        connectedDeviceAddress = deviceAddress
 
         txtBleState.text = "연결 시도 중..."
-        txtConnectedDevice.text = "연결 장치 : ${device.address}"
+        txtConnectedDevice.text = "연결 장치 : $deviceAddress"
 
-        Log.d(TAG, "Connecting to device: ${device.address}")
+        Log.d(TAG, "Connecting to device: $deviceAddress")
 
-        bluetoothGatt?.close()
-        bluetoothGatt = null
-
-        bluetoothGatt = device.connectGatt(this, false, gattCallback)
+        try {
+            bluetoothGatt?.close()
+            bluetoothGatt = null
+            bluetoothGatt = device.connectGatt(this, false, gattCallback)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "connectGatt failed by permission", e)
+            Toast.makeText(this, "BLE 연결 권한 오류", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
