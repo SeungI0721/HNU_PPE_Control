@@ -25,8 +25,13 @@ import com.example.hnu_ppe_control.parser.SensorDataParser
 import com.example.hnu_ppe_control.risk.HeatstrokeAnalyzer
 import com.example.hnu_ppe_control.risk.RiskCommandMapper
 import java.nio.charset.StandardCharsets
+import android.util.Log
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val TAG = "SmartShieldBLE"
+    }
 
     private lateinit var txtBleState: TextView
     private lateinit var txtConnectedDevice: TextView
@@ -135,16 +140,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun startBleScan() {
         if (bluetoothLeScanner == null) {
+            Log.e(TAG, "BLE scanner is null")
             Toast.makeText(this, "BLE 스캐너를 사용할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
 
         if (isScanning) {
+            Log.w(TAG, "Scan already running")
             Toast.makeText(this, "이미 스캔 중입니다.", Toast.LENGTH_SHORT).show()
             return
         }
 
         if (!BlePermissionHelper.hasScanPermission(this)) {
+            Log.e(TAG, "Missing BLUETOOTH_SCAN permission")
             Toast.makeText(this, "BLE 스캔 권한이 필요합니다.", Toast.LENGTH_SHORT).show()
             return
         }
@@ -158,8 +166,13 @@ class MainActivity : AppCompatActivity() {
 
         isScanning = true
 
+        Log.d(TAG, "BLE scan started")
+
         handler.postDelayed({
-            if (isScanning) stopBleScan()
+            if (isScanning) {
+                Log.d(TAG, "BLE scan timeout reached")
+                stopBleScan()
+            }
         }, BleConstants.SCAN_PERIOD)
 
         bluetoothLeScanner?.startScan(scanCallback)
@@ -172,6 +185,7 @@ class MainActivity : AppCompatActivity() {
             BlePermissionHelper.hasScanPermission(this)
         ) {
             bluetoothLeScanner?.stopScan(scanCallback)
+            Log.d(TAG, "BLE scan stopped")
         }
 
         isScanning = false
@@ -186,18 +200,44 @@ class MainActivity : AppCompatActivity() {
             val device = result.device ?: return
             val scanRecord: ScanRecord = result.scanRecord ?: return
 
-            if (!hasTargetServiceUuid(scanRecord)) return
-            if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) return
+            val hasTargetUuid = hasTargetServiceUuid(scanRecord)
+
+            if (!hasTargetUuid) {
+                Log.d(TAG, "Ignored device without target UUID")
+                return
+            }
+
+            if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) {
+                Log.e(TAG, "Missing BLUETOOTH_CONNECT permission while reading scan result")
+                return
+            }
 
             val deviceName = device.name?.takeIf { it.isNotBlank() } ?: "이름 없는 기기"
 
-            if (foundDeviceList.any { it.address == device.address }) return
+            if (foundDeviceList.any { it.address == device.address }) {
+                Log.d(TAG, "Duplicate device ignored: $deviceName / ${device.address}")
+                return
+            }
 
             val deviceInfo = "이름 : $deviceName\n주소 : ${device.address}"
 
             foundDeviceList.add(device)
             deviceInfoList.add(deviceInfo)
             deviceAdapter.notifyDataSetChanged()
+
+            Log.d(TAG, "Target BLE device found: $deviceName / ${device.address}")
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            super.onScanFailed(errorCode)
+
+            isScanning = false
+
+            runOnUiThread {
+                txtBleState.text = "스캔 실패: $errorCode"
+            }
+
+            Log.e(TAG, "BLE scan failed. errorCode=$errorCode")
         }
     }
 
@@ -210,12 +250,15 @@ class MainActivity : AppCompatActivity() {
         stopBleScan()
 
         if (!BlePermissionHelper.hasConnectPermission(this)) {
+            Log.e(TAG, "Missing BLUETOOTH_CONNECT permission. Cannot connect.")
             Toast.makeText(this, "BLE 연결 권한이 필요합니다.", Toast.LENGTH_SHORT).show()
             return
         }
 
         txtBleState.text = "연결 시도 중..."
         txtConnectedDevice.text = "연결 장치 : ${device.address}"
+
+        Log.d(TAG, "Connecting to device: ${device.address}")
 
         bluetoothGatt?.close()
         bluetoothGatt = null
@@ -232,18 +275,28 @@ class MainActivity : AppCompatActivity() {
         ) {
             super.onConnectionStateChange(gatt, status, newState)
 
+            Log.d(
+                TAG,
+                "onConnectionStateChange: status=$status, newState=$newState"
+            )
+
             runOnUiThread {
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
                         txtBleState.text = "BLE 연결 성공"
-                        Toast.makeText(this@MainActivity, "장치 연결 성공", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            this@MainActivity,
+                            "장치 연결 성공",
+                            Toast.LENGTH_SHORT
+                        ).show()
+
+                        Log.d(TAG, "BLE connected. Starting service discovery.")
                     }
 
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         txtBleState.text = "BLE 연결 해제"
                         txtConnectedDevice.text = "연결 장치 : 없음"
 
-                        // 연결이 끊기면 중복 방지 상태 초기화
                         lastSentRiskCommand = null
                         lastAlertRiskLevel = null
 
@@ -252,13 +305,20 @@ class MainActivity : AppCompatActivity() {
                             "장치 연결 해제",
                             Toast.LENGTH_SHORT
                         ).show()
+
+                        Log.w(TAG, "BLE disconnected. Duplicate prevention states reset.")
                     }
                 }
             }
 
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) return
-                gatt.discoverServices()
+                if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) {
+                    Log.e(TAG, "Missing BLUETOOTH_CONNECT permission. Cannot discover services.")
+                    return
+                }
+
+                val discoverStarted = gatt.discoverServices()
+                Log.d(TAG, "discoverServices started=$discoverStarted")
             }
         }
 
@@ -268,41 +328,73 @@ class MainActivity : AppCompatActivity() {
         ) {
             super.onServicesDiscovered(gatt, status)
 
+            Log.d(TAG, "onServicesDiscovered: status=$status")
+
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                runOnUiThread {
+                    txtBleState.text = "서비스 탐색 실패"
+                }
+
+                Log.e(TAG, "Service discovery failed. status=$status")
+                return
+            }
+
             val targetService = gatt.getService(BleConstants.TARGET_SERVICE_UUID)
 
             if (targetService == null) {
                 runOnUiThread { txtBleState.text = "서비스 없음" }
+                Log.e(TAG, "Target service not found: ${BleConstants.TARGET_SERVICE_UUID}")
                 return
             }
+
+            Log.d(TAG, "Target service found: ${BleConstants.TARGET_SERVICE_UUID}")
 
             val dataCharacteristic =
                 targetService.getCharacteristic(BleConstants.DATA_CHARACTERISTIC_UUID)
 
             if (dataCharacteristic == null) {
                 runOnUiThread { txtBleState.text = "데이터 Characteristic 없음" }
+                Log.e(TAG, "Data characteristic not found: ${BleConstants.DATA_CHARACTERISTIC_UUID}")
                 return
             }
 
-            if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) return
+            Log.d(TAG, "Data characteristic found: ${BleConstants.DATA_CHARACTERISTIC_UUID}")
+
+            if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) {
+                Log.e(TAG, "Missing BLUETOOTH_CONNECT permission. Cannot enable notify.")
+                return
+            }
 
             val notifySuccess = gatt.setCharacteristicNotification(dataCharacteristic, true)
+            Log.d(TAG, "setCharacteristicNotification result=$notifySuccess")
 
             val descriptor =
                 dataCharacteristic.getDescriptor(BleConstants.CLIENT_CHARACTERISTIC_CONFIG_UUID)
 
-            descriptor?.let {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    gatt.writeDescriptor(
-                        it,
-                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    )
-                } else {
-                    @Suppress("DEPRECATION")
-                    it.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-
-                    @Suppress("DEPRECATION")
-                    gatt.writeDescriptor(it)
+            if (descriptor == null) {
+                runOnUiThread {
+                    txtBleState.text = "CCCD 없음"
                 }
+
+                Log.e(TAG, "CCCD descriptor not found: ${BleConstants.CLIENT_CHARACTERISTIC_CONFIG_UUID}")
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val result = gatt.writeDescriptor(
+                    descriptor,
+                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                )
+
+                Log.d(TAG, "writeDescriptor Android 13+ result=$result")
+            } else {
+                @Suppress("DEPRECATION")
+                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+
+                @Suppress("DEPRECATION")
+                val result = gatt.writeDescriptor(descriptor)
+
+                Log.d(TAG, "writeDescriptor legacy result=$result")
             }
 
             runOnUiThread {
@@ -313,7 +405,11 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (notifySuccess) {
-                    Toast.makeText(this@MainActivity, "서비스 탐색 완료", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(
+                        this@MainActivity,
+                        "서비스 탐색 완료",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
             }
         }
@@ -328,32 +424,55 @@ class MainActivity : AppCompatActivity() {
             if (characteristic.uuid == BleConstants.DATA_CHARACTERISTIC_UUID) {
                 val data = characteristic.value ?: return
                 val received = String(data, StandardCharsets.UTF_8)
+
+                Log.d(TAG, "Notify received: $received")
+
                 handleReceivedData(received)
             }
         }
     }
 
     private fun handleReceivedData(rawData: String) {
-        val sensorData = SensorDataParser.parse(rawData)
+        val cleanedRawData = rawData.trim()
 
-        if (sensorData == null) {
+        Log.d(TAG, "Raw sensor data: $cleanedRawData")
+
+        if (cleanedRawData.isEmpty()) {
+            Log.w(TAG, "Received empty sensor data")
             showParseError(rawData)
             return
         }
 
+        val sensorData = SensorDataParser.parse(cleanedRawData)
+
+        if (sensorData == null) {
+            Log.w(TAG, "Sensor data parse failed: $cleanedRawData")
+            showParseError(cleanedRawData)
+            return
+        }
+
+        Log.d(TAG, "Parsed sensor data: $sensorData")
+
         val riskLevel = HeatstrokeAnalyzer.analyze(sensorData)
         val command = RiskCommandMapper.toCommand(riskLevel)
+
+        Log.d(TAG, "Risk calculated: ${riskLevel.label}, command=$command")
 
         updateSensorUI(sensorData, riskLevel)
         updateRiskUI(riskLevel)
 
-        // ESP32 Write 중복 방지는 sendRiskCommandToEsp32() 내부에서 처리
         sendRiskCommandToEsp32(command)
 
-        // Alert는 위험 단계가 바뀐 경우에만 실행
         if (riskLevel != lastAlertRiskLevel) {
+            Log.d(
+                TAG,
+                "Risk level changed for alert: previous=${lastAlertRiskLevel?.label}, current=${riskLevel.label}"
+            )
+
             alertManager.handleRisk(riskLevel)
             lastAlertRiskLevel = riskLevel
+        } else {
+            Log.d(TAG, "Alert skipped. Same risk level: ${riskLevel.label}")
         }
     }
 
@@ -393,27 +512,43 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showParseError(rawData: String) {
+        Log.w(TAG, "showParseError called. rawData=$rawData")
+
         runOnUiThread {
-            txtData.text = "데이터 파싱 오류\n$rawData"
+            txtData.text = """
+            데이터 파싱 오류
+            
+            수신 원본:
+            $rawData
+        """.trimIndent()
+
             txtRiskState.text = "상태 : 오류"
             txtRiskState.setBackgroundColor(Color.parseColor("#777777"))
         }
     }
 
     private fun sendRiskCommandToEsp32(command: String) {
-        // 같은 명령이면 ESP32에 반복 전송하지 않음
         if (lastSentRiskCommand == command) {
+            Log.d(TAG, "BLE write skipped. Duplicate command=$command")
             return
         }
 
-        val gatt = bluetoothGatt ?: return
+        val gatt = bluetoothGatt
+
+        if (gatt == null) {
+            Log.e(TAG, "BLE write failed. bluetoothGatt is null")
+            return
+        }
 
         if (!BlePermissionHelper.hasConnectPermission(this)) {
+            Log.e(TAG, "BLE write failed. Missing BLUETOOTH_CONNECT permission")
             return
         }
 
         val targetService = gatt.getService(BleConstants.TARGET_SERVICE_UUID)
+
         if (targetService == null) {
+            Log.e(TAG, "BLE write failed. Target service is null")
             return
         }
 
@@ -421,6 +556,7 @@ class MainActivity : AppCompatActivity() {
             targetService.getCharacteristic(BleConstants.CONTROL_CHARACTERISTIC_UUID)
 
         if (controlCharacteristic == null) {
+            Log.e(TAG, "BLE write failed. Control characteristic is null")
             return
         }
 
@@ -433,33 +569,48 @@ class MainActivity : AppCompatActivity() {
                 BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             )
 
+            Log.d(TAG, "writeCharacteristic Android 13+ result=$result, command=$command")
+
             result == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             controlCharacteristic.value = sendData
 
             @Suppress("DEPRECATION")
-            gatt.writeCharacteristic(controlCharacteristic)
+            val result = gatt.writeCharacteristic(controlCharacteristic)
+
+            Log.d(TAG, "writeCharacteristic legacy result=$result, command=$command")
+
+            result
         }
 
-        // Write 요청이 정상적으로 시작된 경우에만 마지막 명령 저장
         if (writeStarted) {
             lastSentRiskCommand = command
+            Log.d(TAG, "BLE write started successfully. lastSentRiskCommand=$command")
+        } else {
+            Log.e(TAG, "BLE write failed to start. command=$command")
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
 
+        Log.d(TAG, "onDestroy called. Closing BLE resources.")
+
         stopBleScan()
 
         bluetoothGatt?.let { gatt ->
             if (BlePermissionHelper.hasConnectPermission(this)) {
                 gatt.close()
+                Log.d(TAG, "BluetoothGatt closed")
+            } else {
+                Log.w(TAG, "BluetoothGatt close skipped. Missing permission.")
             }
         }
 
         bluetoothGatt = null
+        lastSentRiskCommand = null
+        lastAlertRiskLevel = null
     }
 
     override fun onRequestPermissionsResult(
