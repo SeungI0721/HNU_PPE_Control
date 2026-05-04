@@ -1,5 +1,4 @@
 package com.example.hnu_ppe_control
-
 import android.bluetooth.*
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
@@ -39,6 +38,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var txtData: TextView
     private lateinit var txtRiskState: TextView
     private lateinit var btnScan: Button
+    // 테스트 버튼
+    private lateinit var btnFakeData: Button
     private lateinit var listBle: ListView
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -93,6 +94,9 @@ class MainActivity : AppCompatActivity() {
         txtRiskState = findViewById(R.id.txtRiskState)
         btnScan = findViewById(R.id.btnScan)
         listBle = findViewById(R.id.listBle)
+
+        btnScan = findViewById(R.id.btnScan)
+        btnFakeData = findViewById(R.id.btnFakeData)
     }
 
     private fun initManagers() {
@@ -147,6 +151,15 @@ class MainActivity : AppCompatActivity() {
             startBleScan()
         }
 
+        btnFakeData.setOnClickListener {
+            val fakeData = generateFakeSensorData()
+
+            Log.d(TAG, "Fake data generated: $fakeData")
+
+            // 실제 BLE Notify 수신과 같은 흐름으로 처리
+            handleReceivedData(fakeData)
+        }
+
         listBle.setOnItemClickListener { _, _, position, _ ->
             if (position < 0 || position >= foundDeviceList.size) return@setOnItemClickListener
             connectToDevice(foundDeviceList[position])
@@ -181,7 +194,15 @@ class MainActivity : AppCompatActivity() {
 
         isScanning = true
 
-        Log.d(TAG, "BLE scan started")
+        try {
+            bluetoothLeScanner?.startScan(scanCallback)
+            Log.d(TAG, "BLE scan started")
+        } catch (e: SecurityException) {
+            isScanning = false
+            Log.e(TAG, "startScan failed by permission", e)
+            Toast.makeText(this, "BLE 스캔 권한 오류", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         handler.postDelayed({
             if (isScanning) {
@@ -189,8 +210,6 @@ class MainActivity : AppCompatActivity() {
                 stopBleScan()
             }
         }, BleConstants.SCAN_PERIOD)
-
-        bluetoothLeScanner?.startScan(scanCallback)
     }
 
     private fun stopBleScan() {
@@ -225,7 +244,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) {
-                Log.e(TAG, "Missing BLUETOOTH_CONNECT permission while reading device info")
+                Log.e(TAG, "Missing BLUETOOTH_CONNECT permission while reading scan result")
                 return
             }
 
@@ -518,7 +537,26 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+    private fun generateFakeSensorData(): String {
+        val fakeSamples = listOf(
+            // 정상
+            "ID:0001,TEMP:36.5,HR:82,ENV:28.5,HUM:55,POSTURE:NORMAL",
 
+            // 주의
+            "ID:0001,TEMP:37.6,HR:105,ENV:31.5,HUM:72,POSTURE:NORMAL",
+
+            // 위험
+            "ID:0001,TEMP:38.1,HR:125,ENV:34.2,HUM:81,POSTURE:WARNING",
+
+            // 응급: 낙상
+            "ID:0001,TEMP:37.8,HR:130,ENV:35.5,HUM:85,POSTURE:FALL",
+
+            // 응급: 명시적 응급 posture
+            "ID:0001,TEMP:38.5,HR:140,ENV:36.0,HUM:88,POSTURE:EMERGENCY"
+        )
+
+        return fakeSamples.random()
+    }
     private fun handleReceivedData(rawData: String) {
         if (!isBleConnected || !isNotifyReady) {
             Log.w(
@@ -864,11 +902,15 @@ class MainActivity : AppCompatActivity() {
         stopOfflineChecker()
 
         bluetoothGatt?.let { gatt ->
-            if (BlePermissionHelper.hasConnectPermission(this)) {
-                gatt.close()
-                Log.d(TAG, "BluetoothGatt closed")
-            } else {
-                Log.w(TAG, "BluetoothGatt close skipped. Missing permission.")
+            try {
+                if (BlePermissionHelper.hasConnectPermission(this)) {
+                    gatt.close()
+                    Log.d(TAG, "BluetoothGatt closed")
+                } else {
+                    Log.w(TAG, "BluetoothGatt close skipped. Missing permission.")
+                }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "BluetoothGatt close failed by permission", e)
             }
         }
 

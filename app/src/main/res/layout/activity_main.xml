@@ -41,6 +41,13 @@
         android:layout_marginTop="16dp"
         android:text="BLE 기기 검색" />
 
+    <!-- FakeData 버튼 -->
+    <Button
+        android:id="@+id/btnFakeData"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Fake 데이터 테스트" />
+
     <!-- 검색된 장치 목록 -->
     <ListView
         android:id="@+id/listBle"
