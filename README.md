@@ -21,7 +21,6 @@ Smart Shield는 건설 현장의 고온·다습 환경, 강한 일사, 반복적
 - 산소포화도
 - 주변 온도 및 습도
 - 조도
-- 비접촉 적외선 온도
 - 자세 및 움직임
 
 수집된 데이터는 ESP32 웨어러블 장치에서 BLE를 통해 작업자 Android 앱으로 전송되며,
@@ -85,7 +84,6 @@ currentStatus / riskLogs 업로드
 | ESP32 | ESP32 Development Board | 메인 컨트롤러, BLE 통신, 센서 데이터 수집, 경고 출력 제어 |
 | MPU6050 | 6축 가속도/자이로 센서 | 자세 변화, 움직임, 낙상, 움직임 없음 감지 |
 | BME280 | 온습도/기압 센서 | 주변 온도, 습도, 기압 측정 |
-| MLX90614 | 비접촉 적외선 온도 센서 | 주변 고온 표면 및 열원 영향 추정 |
 | MAX30102 | 심박수/산소포화도 센서 | 심박수 및 SpO₂ 측정 |
 | MIKROE-2554 | Fever Click / MAX30205 기반 온도 센서 | 피부 표면 온도 측정 |
 | GY-302 / BH1750 | 디지털 조도 센서 모듈 | 조도 측정, 직사광선 노출 가능성 추정 |
@@ -218,23 +216,7 @@ GY-302는 BH1750 기반 디지털 조도 센서 모듈로, lux 단위의 빛 밝
 
 ---
 
-### 5. MLX90614
-
-MLX90614는 비접촉 적외선 온도 센서입니다.
-
-기존처럼 피부온도 측정용으로 사용하지 않고,
-작업자 주변의 뜨거운 바닥, 철골, 장비 표면 등 고온 표면 또는 열원 영향을 보조적으로 추정하는 데 사용합니다.
-
-```text
-주변 표면 온도 상승
-+ 조도 상승
-+ 고온다습 환경
-= 외부 열부하 증가 가능성
-```
-
----
-
-### 6. MPU6050
+### 5. MPU6050
 
 MPU6050은 가속도 및 자이로 데이터를 기반으로 작업자의 자세와 움직임을 감지합니다.
 
@@ -249,7 +231,7 @@ MPU6050은 가속도 및 자이로 데이터를 기반으로 작업자의 자세
 
 ---
 
-### 7. YwRobot RGB LED Module
+### 6. YwRobot RGB LED Module
 
 YwRobot RGB LED 모듈은 위험 단계를 시각적으로 표시하는 출력 모듈입니다.
 
@@ -271,7 +253,7 @@ GPIO HIGH = 해당 색상 OFF
 
 ---
 
-### 8. Vibration Module
+### 7. Vibration Module
 
 진동 모듈은 작업자에게 촉각 경고를 제공하기 위한 출력 장치입니다.
 
@@ -286,7 +268,7 @@ GPIO HIGH = 해당 색상 OFF
 
 ---
 
-### 9. DFPlayer Mini
+### 8. DFPlayer Mini
 
 DFPlayer Mini는 위험 단계별 음성 경고를 출력하기 위한 모듈입니다.
 
@@ -382,7 +364,7 @@ ID:0001,TEMP:36.5,HR:102,ENV:33.1,HUM:71,POSTURE:NORMAL
 확장 형식:
 
 ```text
-ID:0001,TEMP:36.5,HR:102,SPO2:97,ENV:33.1,HUM:71,LUX:45000,IR:41.2,POSTURE:NORMAL
+ID:0001,TEMP:36.5,HR:102,SPO2:97,ENV:33.1,HUM:71,LUX:45000,POSTURE:NORMAL
 ```
 
 ---
@@ -398,7 +380,6 @@ ID:0001,TEMP:36.5,HR:102,SPO2:97,ENV:33.1,HUM:71,LUX:45000,IR:41.2,POSTURE:NORMA
 | ENV | 주변 온도 |
 | HUM | 주변 습도 |
 | LUX | 조도 |
-| IR | 비접촉 적외선 온도 |
 | POSTURE | 자세 및 움직임 상태 |
 
 ---
@@ -530,7 +511,6 @@ Foreground Service 기반 백그라운드 동작
 + 심박수 상승
 + 피부온도 상승
 + 직사광선 노출 가능성
-+ 주변 고온 표면 가능성
 
 응급:
 낙상 감지
@@ -564,7 +544,6 @@ workers/{workerId}/riskLogs/{logId}
   "envTemp": 33.1,
   "humidity": 71,
   "lux": 45000,
-  "irTemp": 41.2,
   "posture": "NORMAL",
   "bleConnected": true,
   "timestamp": 1710000000000
@@ -585,7 +564,6 @@ workers/{workerId}/riskLogs/{logId}
   "envTemp": 34.5,
   "humidity": 78,
   "lux": 52000,
-  "irTemp": 43.1,
   "posture": "NORMAL",
   "timestamp": 1710000000000
 }
@@ -630,7 +608,6 @@ Firebase 데이터 수정
 | MPU6050 | ESP32 근처, 몸통에 단단히 고정 |
 | BME280 | 조끼 외부, 통풍 가능한 위치 |
 | GY-302 / BH1750 | 조끼 앞쪽 상단 또는 어깨끈 외부 |
-| MLX90614 | 전방 또는 아래 방향 |
 | MIKROE-2554 | 조끼 안쪽 쇄골 아래 피부 접촉부 |
 | MAX30102 | 손가락 클립형, 향후 손목/상완 밴드 확장 |
 | RGB LED Module | 조끼 앞가슴 외부 |
@@ -654,10 +631,6 @@ MIKROE-2554:
 GY-302 / BH1750:
 복사열 측정 X
 직사광선 노출 가능성 추정 O
-
-MLX90614:
-피부온도 측정용 X
-주변 고온 표면 및 열원 영향 추정 O
 
 MAX30102:
 절대값 단독 판단 X
