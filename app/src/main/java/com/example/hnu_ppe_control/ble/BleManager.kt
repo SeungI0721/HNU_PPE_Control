@@ -1,3 +1,4 @@
+// Smart Shield ESP32 BLE 스캔, 연결, Notify 수신, Write 전송, 자동 재연결을 담당하는 파일
 package com.example.hnu_ppe_control.ble
 
 import android.bluetooth.BluetoothAdapter
@@ -91,6 +92,7 @@ class BleManager(
     fun isBluetoothEnabled(): Boolean = bluetoothAdapter?.isEnabled == true
 
     fun startScan() {
+        // BLE 스캐너 상태와 권한을 확인한 뒤 SS_XXXX 장치 검색을 시작합니다.
         bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
 
         if (bluetoothLeScanner == null) {
@@ -123,13 +125,12 @@ class BleManager(
         }
 
         mainHandler.postDelayed({
-            if (isScanning) {
-                stopScan()
-            }
+            if (isScanning) stopScan()
         }, BleConstants.SCAN_PERIOD)
     }
 
     fun stopScan() {
+        // 스캔은 배터리 소모가 크기 때문에 제한 시간 후 반드시 중지
         if (bluetoothLeScanner != null && isScanning && BlePermissionHelper.hasScanPermission(context)) {
             try {
                 bluetoothLeScanner?.stopScan(scanCallback)
@@ -146,6 +147,7 @@ class BleManager(
     }
 
     fun connect(device: BluetoothDevice) {
+        // 사용자가 선택한 ESP32 장치에 GATT 연결을 시도
         stopScan()
 
         if (!BlePermissionHelper.hasConnectPermission(context)) {
@@ -157,7 +159,6 @@ class BleManager(
         val name = readDeviceName(device) ?: "Unknown"
 
         resetConnectionFlags()
-
         isManualDisconnect = false
         lastConnectedDevice = device
         connectedDeviceAddress = address
@@ -177,6 +178,7 @@ class BleManager(
     }
 
     fun disconnectManually() {
+        // 작업자가 직접 연결을 끊으면 자동 재연결을 하지 않습니다.
         isManualDisconnect = true
         stopReconnect()
         stopOfflineChecker()
@@ -195,6 +197,7 @@ class BleManager(
     }
 
     fun writeRiskCommand(command: String) {
+        // 위험 명령은 같은 값이 반복 전송되지 않도록 막습니다.
         if (lastSentRiskCommand == command) {
             Log.d(TAG, "BLE write skipped. Duplicate command=$command")
             listener.onWriteResult(command, started = false, reason = "duplicate")
@@ -202,10 +205,6 @@ class BleManager(
         }
 
         if (!isBleConnected || !isServiceDiscovered) {
-            Log.w(
-                TAG,
-                "BLE write skipped. connected=$isBleConnected, serviceDiscovered=$isServiceDiscovered"
-            )
             listener.onWriteResult(command, started = false, reason = "not_ready")
             return
         }
@@ -230,32 +229,7 @@ class BleManager(
         }
 
         val sendData = command.toByteArray(StandardCharsets.UTF_8)
-
-        val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            try {
-                val result = gatt.writeCharacteristic(
-                    characteristic,
-                    sendData,
-                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                )
-                result == BluetoothStatusCodes.SUCCESS
-            } catch (e: SecurityException) {
-                Log.e(TAG, "writeCharacteristic failed by permission", e)
-                false
-            }
-        } else {
-            try {
-                @Suppress("DEPRECATION")
-                characteristic.value = sendData
-                @Suppress("DEPRECATION")
-                characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                @Suppress("DEPRECATION")
-                gatt.writeCharacteristic(characteristic)
-            } catch (e: SecurityException) {
-                Log.e(TAG, "writeCharacteristic legacy failed by permission", e)
-                false
-            }
-        }
+        val started = writeCharacteristic(gatt, characteristic, sendData)
 
         if (started) {
             lastSentRiskCommand = command
@@ -268,6 +242,7 @@ class BleManager(
     }
 
     fun release() {
+        // Activity 종료 시 BLE 관련 콜백과 GATT 리소스를 모두 정리
         stopScan()
         stopReconnect()
         stopOfflineChecker()
@@ -285,13 +260,8 @@ class BleManager(
             val name = readDeviceName(device) ?: return
             val address = readDeviceAddress(device) ?: return
 
-            if (!name.matches(Regex("^SS_\\d{4}$"))) {
-                return
-            }
-
-            if (!hasTargetServiceUuid(scanRecord)) {
-                return
-            }
+            if (!name.matches(Regex("^SS_\\d{4}$"))) return
+            if (!hasTargetServiceUuid(scanRecord)) return
 
             listener.onDeviceFound(
                 BleDeviceInfo(
@@ -316,82 +286,14 @@ class BleManager(
             Log.d(TAG, "onConnectionStateChange: status=$status, newState=$newState")
 
             when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> {
-                    isBleConnected = true
-                    isServiceDiscovered = false
-                    isNotifyReady = false
-                    lastSentRiskCommand = null
-
-                    stopReconnect()
-                    startOfflineChecker()
-                    listener.onConnected(connectedDeviceName, connectedDeviceAddress ?: "")
-
-                    if (!BlePermissionHelper.hasConnectPermission(context)) {
-                        listener.onBleStatusChanged("BLE 상태: 서비스 탐색 권한 없음")
-                        return
-                    }
-
-                    try {
-                        val started = gatt.discoverServices()
-                        Log.d(TAG, "discoverServices started=$started")
-                    } catch (e: SecurityException) {
-                        Log.e(TAG, "discoverServices failed by permission", e)
-                    }
-                }
-
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.w(TAG, "BLE disconnected. status=$status")
-
-                    isBleConnected = false
-                    isServiceDiscovered = false
-                    isNotifyReady = false
-                    lastSentRiskCommand = null
-                    listener.onDisconnected(manual = isManualDisconnect)
-
-                    if (isManualDisconnect) {
-                        stopOfflineChecker()
-                        closeGatt()
-                    } else {
-                        startReconnect()
-                    }
-                }
+                BluetoothProfile.STATE_CONNECTED -> handleGattConnected(gatt)
+                BluetoothProfile.STATE_DISCONNECTED -> handleGattDisconnected(status)
             }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             super.onServicesDiscovered(gatt, status)
-            Log.d(TAG, "onServicesDiscovered: status=$status")
-
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                isServiceDiscovered = false
-                isNotifyReady = false
-                listener.onBleStatusChanged("BLE 상태: 서비스 탐색 실패")
-                return
-            }
-
-            val service = gatt.getService(BleConstants.TARGET_SERVICE_UUID)
-            val notifyCharacteristic =
-                service?.getCharacteristic(BleConstants.DATA_CHARACTERISTIC_UUID)
-            val writeCharacteristic =
-                service?.getCharacteristic(BleConstants.CONTROL_CHARACTERISTIC_UUID)
-
-            if (service == null) {
-                listener.onBleStatusChanged("BLE 상태: 대상 서비스 없음")
-                return
-            }
-
-            isServiceDiscovered = true
-
-            if (notifyCharacteristic == null) {
-                listener.onBleStatusChanged("BLE 상태: Notify 특성 없음")
-                return
-            }
-
-            if (writeCharacteristic == null) {
-                listener.onWriteResult("", started = false, reason = "write_characteristic_null")
-            }
-
-            enableNotify(gatt, notifyCharacteristic)
+            handleServicesDiscovered(gatt, status)
         }
 
         @Suppress("DEPRECATION")
@@ -413,7 +315,86 @@ class BleManager(
         }
     }
 
+    private fun handleGattConnected(gatt: BluetoothGatt) {
+        // 연결 직후에는 GATT 서비스 탐색
+        isBleConnected = true
+        isServiceDiscovered = false
+        isNotifyReady = false
+        lastSentRiskCommand = null
+
+        stopReconnect()
+        startOfflineChecker()
+        listener.onConnected(connectedDeviceName, connectedDeviceAddress ?: "")
+
+        if (!BlePermissionHelper.hasConnectPermission(context)) {
+            listener.onBleStatusChanged("BLE 상태: 서비스 탐색 권한 없음")
+            return
+        }
+
+        try {
+            val started = gatt.discoverServices()
+            Log.d(TAG, "discoverServices started=$started")
+        } catch (e: SecurityException) {
+            Log.e(TAG, "discoverServices failed by permission", e)
+        }
+    }
+
+    private fun handleGattDisconnected(status: Int) {
+        // 비정상 연결 해제는 자동 재연결 대상으로 처리
+        Log.w(TAG, "BLE disconnected. status=$status")
+
+        isBleConnected = false
+        isServiceDiscovered = false
+        isNotifyReady = false
+        lastSentRiskCommand = null
+        listener.onDisconnected(manual = isManualDisconnect)
+
+        if (isManualDisconnect) {
+            stopOfflineChecker()
+            closeGatt()
+        } else {
+            startReconnect()
+        }
+    }
+
+    private fun handleServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+        // 대상 서비스, Notify 특성, Write 특성을 찾아 Notify를 활성화
+        Log.d(TAG, "onServicesDiscovered: status=$status")
+
+        if (status != BluetoothGatt.GATT_SUCCESS) {
+            isServiceDiscovered = false
+            isNotifyReady = false
+            listener.onBleStatusChanged("BLE 상태: 서비스 탐색 실패")
+            return
+        }
+
+        val service = gatt.getService(BleConstants.TARGET_SERVICE_UUID)
+        val notifyCharacteristic =
+            service?.getCharacteristic(BleConstants.DATA_CHARACTERISTIC_UUID)
+        val writeCharacteristic =
+            service?.getCharacteristic(BleConstants.CONTROL_CHARACTERISTIC_UUID)
+
+        if (service == null) {
+            listener.onBleStatusChanged("BLE 상태: 대상 서비스 없음")
+            return
+        }
+
+        isServiceDiscovered = true
+
+        if (notifyCharacteristic == null) {
+            listener.onBleStatusChanged("BLE 상태: Notify 특성 없음")
+            return
+        }
+
+        if (writeCharacteristic == null) {
+            listener.onWriteResult("", started = false, reason = "write_characteristic_null")
+        }
+
+        enableNotify(gatt, notifyCharacteristic)
+    }
+
     private fun enableNotify(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+        // ESP32가 1초 주기로 보내는 센서 데이터를 받기 위해 CCCD를 활성화
         if (!BlePermissionHelper.hasConnectPermission(context)) {
             listener.onBleStatusChanged("BLE 상태: Notify 권한 없음")
             return
@@ -435,7 +416,36 @@ class BleManager(
             return
         }
 
-        val descriptorWriteStarted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val descriptorWriteStarted = writeNotifyDescriptor(gatt, descriptor)
+        isNotifyReady = notifyEnabled && descriptorWriteStarted
+
+        if (isNotifyReady) {
+            listener.onNotifyReady()
+        } else {
+            listener.onBleStatusChanged("BLE 상태: Notify 설정 실패")
+        }
+    }
+
+    private fun handleNotifyValue(
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray?
+    ) {
+        // Notify로 받은 ByteArray를 UTF-8 문자열 payload로 변환
+        if (characteristic.uuid != BleConstants.DATA_CHARACTERISTIC_UUID) return
+
+        val bytes = value ?: return
+        val rawData = String(bytes, StandardCharsets.UTF_8)
+        lastDataReceivedTime = System.currentTimeMillis()
+
+        Log.d(TAG, "Notify received: $rawData")
+        listener.onDataReceived(rawData)
+    }
+
+    private fun writeNotifyDescriptor(
+        gatt: BluetoothGatt,
+        descriptor: BluetoothGattDescriptor
+    ): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             try {
                 val result = gatt.writeDescriptor(
                     descriptor,
@@ -457,36 +467,43 @@ class BleManager(
                 false
             }
         }
-
-        isNotifyReady = notifyEnabled && descriptorWriteStarted
-
-        if (isNotifyReady) {
-            listener.onNotifyReady()
-        } else {
-            listener.onBleStatusChanged("BLE 상태: Notify 설정 실패")
-        }
     }
 
-    private fun handleNotifyValue(
+    private fun writeCharacteristic(
+        gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic,
-        value: ByteArray?
-    ) {
-        if (characteristic.uuid != BleConstants.DATA_CHARACTERISTIC_UUID) {
-            return
+        sendData: ByteArray
+    ): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                val result = gatt.writeCharacteristic(
+                    characteristic,
+                    sendData,
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                )
+                result == BluetoothStatusCodes.SUCCESS
+            } catch (e: SecurityException) {
+                Log.e(TAG, "writeCharacteristic failed by permission", e)
+                false
+            }
+        } else {
+            try {
+                @Suppress("DEPRECATION")
+                characteristic.value = sendData
+                @Suppress("DEPRECATION")
+                characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                @Suppress("DEPRECATION")
+                gatt.writeCharacteristic(characteristic)
+            } catch (e: SecurityException) {
+                Log.e(TAG, "writeCharacteristic legacy failed by permission", e)
+                false
+            }
         }
-
-        val bytes = value ?: return
-        val rawData = String(bytes, StandardCharsets.UTF_8)
-        lastDataReceivedTime = System.currentTimeMillis()
-
-        Log.d(TAG, "Notify received: $rawData")
-        listener.onDataReceived(rawData)
     }
 
     private fun startReconnect() {
-        if (lastConnectedDevice == null || isReconnecting) {
-            return
-        }
+        // BLE가 예기치 않게 끊기면 3초 간격으로 10분 동안 재연결을 시도
+        if (lastConnectedDevice == null || isReconnecting) return
 
         isReconnecting = true
         reconnectStartTime = System.currentTimeMillis()
@@ -537,6 +554,7 @@ class BleManager(
     }
 
     private fun startOfflineChecker() {
+        // 연결은 되어 있지만 Notify가 멈춘 상태를 UI에서 확인하기 위한 타이머
         if (isOfflineCheckerRunning) return
 
         isOfflineCheckerRunning = true

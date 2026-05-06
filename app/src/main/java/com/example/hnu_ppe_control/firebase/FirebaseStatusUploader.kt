@@ -1,3 +1,4 @@
+// Firebase Realtime Database에 작업자 현재 상태와 위험 로그를 업로드하는 파일
 package com.example.hnu_ppe_control.firebase
 
 import android.util.Log
@@ -15,14 +16,17 @@ object FirebaseStatusUploader {
         deviceName: String,
         temp: Double,
         hr: Int,
+        spo2: Int?,
         env: Double,
         hum: Double,
+        lux: Int,
         posture: String,
         riskLevel: String,
         riskCommand: String,
         bleConnected: Boolean,
         appSessionActive: Boolean
     ) {
+        // currentStatus는 관리자 앱이 실시간으로 읽는 덮어쓰기 경로
         if (workerId.isBlank()) {
             Log.e(TAG, "currentStatus upload FAILED. workerId is blank")
             return
@@ -39,8 +43,11 @@ object FirebaseStatusUploader {
             "deviceName" to deviceName,
             "temp" to temp,
             "hr" to hr,
+            "spo2" to spo2,
             "env" to env,
             "hum" to hum,
+            "lux" to lux,
+            "directSunlight" to (lux >= 50000),
             "posture" to posture,
             "riskLevel" to riskLevel,
             "riskCommand" to riskCommand,
@@ -69,11 +76,14 @@ object FirebaseStatusUploader {
         riskCommand: String,
         temp: Double,
         hr: Int,
+        spo2: Int?,
         env: Double,
         hum: Double,
+        lux: Int,
         posture: String,
         message: String
     ) {
+        // riskLogs는 위험/응급 이벤트를 push()로 누적 저장하는 경로
         if (workerId.isBlank()) {
             Log.e(TAG, "riskLog upload FAILED. workerId is blank")
             return
@@ -92,8 +102,11 @@ object FirebaseStatusUploader {
             "riskCommand" to riskCommand,
             "temp" to temp,
             "hr" to hr,
+            "spo2" to spo2,
             "env" to env,
             "hum" to hum,
+            "lux" to lux,
+            "directSunlight" to (lux >= 50000),
             "posture" to posture,
             "message" to message,
             "createdAt" to System.currentTimeMillis()

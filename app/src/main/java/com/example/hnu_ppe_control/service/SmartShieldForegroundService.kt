@@ -1,3 +1,4 @@
+// Smart Shield 작업자 앱이 백그라운드에서도 실행 중임을 알림으로 유지하는 Foreground Service 파일
 package com.example.hnu_ppe_control.service
 
 import android.app.Notification
@@ -25,10 +26,12 @@ class SmartShieldForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // Android 8 이상에서 Foreground Service 알림을 띄우기 위한 채널
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // START는 상단 알림 표시, STOP은 알림 제거와 서비스 종료를 수행합니다.
         when (intent?.action) {
             ACTION_STOP -> {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -46,6 +49,7 @@ class SmartShieldForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun buildNotification(): Notification {
+        // 사용자가 알림을 누르면 작업자 앱 화면으로 돌아옵니다.
         val contentIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -65,6 +69,7 @@ class SmartShieldForegroundService : Service() {
     }
 
     private fun createNotificationChannel() {
+        // 알림 중요도는 낮게 설정하여 지속 실행 상태만 조용히 표시합니다.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return
         }

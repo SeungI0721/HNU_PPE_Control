@@ -1,3 +1,4 @@
+// ESP32에서 받은 문자열 payload를 SensorData로 변환하고 유효성을 검사하는 파일
 package com.example.hnu_ppe_control.parser
 
 import com.example.hnu_ppe_control.data.SensorData
@@ -13,101 +14,81 @@ object SensorDataParser {
     )
 
     fun parse(rawData: String): SensorData? {
+        // 빈 문자열, 필드 누락, 타입 오류, 범위 오류, 자세 이상값을 모두 null로 방어
         val cleanedData = rawData.trim()
 
-        if (cleanedData.isEmpty()) {
-            return null
-        }
+        if (cleanedData.isEmpty()) return null
+        if (!hasRequiredKeys(cleanedData)) return null
 
-        // 필수 키가 없으면 잘린 데이터로 판단
-        if (
-            !cleanedData.contains("ID:") ||
-            !cleanedData.contains("TEMP:") ||
-            !cleanedData.contains("HR:") ||
-            !cleanedData.contains("ENV:") ||
-            !cleanedData.contains("HUM:") ||
-            !cleanedData.contains("POSTURE:")
-        ) {
-            return null
-        }
+        val dataMap = cleanedData
+            .split(",")
+            .mapNotNull { part ->
+                val keyValue = part.split(":", limit = 2)
+                if (keyValue.size != 2) return@mapNotNull null
 
-        val dataMap = mutableMapOf<String, String>()
-
-        val parts = cleanedData.split(",")
-
-        for (part in parts) {
-            val keyValue = part.split(":", limit = 2)
-
-            if (keyValue.size != 2) {
-                continue
+                val key = keyValue[0].trim()
+                val value = keyValue[1].trim()
+                if (key.isEmpty() || value.isEmpty()) null else key to value
             }
-
-            val key = keyValue[0].trim()
-            val value = keyValue[1].trim()
-
-            if (key.isNotEmpty() && value.isNotEmpty()) {
-                dataMap[key] = value
-            }
-        }
+            .toMap()
 
         val id = dataMap["ID"] ?: return null
         val temp = dataMap["TEMP"]?.toDoubleOrNull() ?: return null
         val hr = dataMap["HR"]?.toIntOrNull() ?: return null
+        val spo2 = dataMap["SPO2"]?.toIntOrNull()
         val env = dataMap["ENV"]?.toDoubleOrNull() ?: return null
         val hum = dataMap["HUM"]?.toIntOrNull() ?: return null
+        val lux = dataMap["LUX"]?.toIntOrNull() ?: return null
         val posture = dataMap["POSTURE"]?.uppercase() ?: return null
 
-        if (!isValidWorkerId(id)) {
-            return null
-        }
-
-        if (!isValidSensorRange(temp, hr, env, hum)) {
-            return null
-        }
-
-        if (!allowedPostures.contains(posture)) {
-            return null
-        }
+        if (!isValidWorkerId(id)) return null
+        if (!isValidSensorRange(temp, hr, spo2, env, hum, lux)) return null
+        if (!allowedPostures.contains(posture)) return null
 
         return SensorData(
             id = id,
             temp = temp,
             hr = hr,
+            spo2 = spo2,
             env = env,
             hum = hum,
+            lux = lux,
             posture = posture
         )
     }
 
+    private fun hasRequiredKeys(cleanedData: String): Boolean {
+        // 필수 키가 없으면 잘못된 데이터로 판단합니다. SPO2는 필수 검사에서 제외합니다.
+        return cleanedData.contains("ID:") &&
+            cleanedData.contains("TEMP:") &&
+            cleanedData.contains("HR:") &&
+            cleanedData.contains("ENV:") &&
+            cleanedData.contains("HUM:") &&
+            cleanedData.contains("LUX:") &&
+            cleanedData.contains("POSTURE:")
+    }
+
     private fun isValidWorkerId(id: String): Boolean {
+        // workerId는 BLE 이름, payload, Firebase 경로에서 같은 4자리 숫자입니다.
         return id.length == 4 && id.all { it.isDigit() }
     }
 
     private fun isValidSensorRange(
         temp: Double,
         hr: Int,
+        spo2: Int?,
         env: Double,
-        hum: Int
+        hum: Int,
+        lux: Int
     ): Boolean {
-        if (temp.isNaN() || env.isNaN()) {
-            return false
-        }
-
-        if (temp < 30.0 || temp > 43.0) {
-            return false
-        }
-
-        if (hr < 30 || hr > 220) {
-            return false
-        }
-
-        if (env < -20.0 || env > 60.0) {
-            return false
-        }
-
-        if (hum < 0 || hum > 100) {
-            return false
-        }
+        // 센서값이 비정상 범위를 벗어나면 위험도 계산 전에 버립니다.
+        if (temp.isNaN() || env.isNaN()) return false
+        if (temp < 30.0 || temp > 43.0) return false
+        if (hr < 30 || hr > 220) return false
+        if (spo2 != null && (spo2 < 50 || spo2 > 100)) return false
+        if (env < -20.0 || env > 60.0) return false
+        if (hum < 0 || hum > 100) return false
+        if (lux < 0 || lux > 200000) return false
 
         return true
     }

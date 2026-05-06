@@ -1,16 +1,11 @@
+// Smart Shield 작업자 앱의 메인 화면 흐름을 제어하는 Activity 파일
 package com.example.hnu_ppe_control
 
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.ListView
-import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -22,10 +17,13 @@ import com.example.hnu_ppe_control.ble.BlePermissionHelper
 import com.example.hnu_ppe_control.data.RiskLevel
 import com.example.hnu_ppe_control.data.SensorData
 import com.example.hnu_ppe_control.firebase.FirebaseStatusUploader
+import com.example.hnu_ppe_control.firebase.RiskLogPolicy
 import com.example.hnu_ppe_control.parser.SensorDataParser
 import com.example.hnu_ppe_control.risk.HeatstrokeAnalyzer
 import com.example.hnu_ppe_control.risk.RiskCommandMapper
-import com.example.hnu_ppe_control.service.SmartShieldForegroundService
+import com.example.hnu_ppe_control.service.ForegroundServiceController
+import com.example.hnu_ppe_control.test.FakeSensorDataProvider
+import com.example.hnu_ppe_control.ui.MainUiController
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -34,32 +32,18 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
 
     companion object {
         private const val TAG = "SmartShieldBLE"
-        private const val FIREBASE_TAG = "SmartShieldFirebase"
         private const val REQUEST_NOTIFICATION_PERMISSION = 2001
     }
 
-    private lateinit var txtBleState: TextView
-    private lateinit var txtReconnectState: TextView
-    private lateinit var txtConnectedDevice: TextView
-    private lateinit var txtData: TextView
-    private lateinit var txtRiskState: TextView
-    private lateinit var txtRiskCommand: TextView
-    private lateinit var txtFirebaseState: TextView
-    private lateinit var txtLastUpdate: TextView
-    private lateinit var btnScan: Button
-    private lateinit var btnDisconnect: Button
-    private lateinit var btnFakeData: Button
-    private lateinit var listBle: ListView
-
     private lateinit var bleManager: BleManager
     private lateinit var alertManager: AlertManager
-    private lateinit var deviceAdapter: ArrayAdapter<String>
+    private lateinit var ui: MainUiController
+    private lateinit var riskLogPolicy: RiskLogPolicy
+    private lateinit var foregroundServiceController: ForegroundServiceController
 
-    private val deviceInfoList = ArrayList<String>()
     private val foundDeviceList = ArrayList<BleManager.BleDeviceInfo>()
 
     private var appSessionActive = false
-    private var lastLoggedRiskLevel: RiskLevel? = null
     private var lastSensorData: SensorData? = null
     private var lastRiskLevel: RiskLevel = RiskLevel.SAFE
     private var lastRiskCommand: String = "RISK:SAFE"
@@ -68,176 +52,128 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        initViews()
         initManagers()
-        initDeviceList()
-        initDefaultUi()
-        initListeners()
+        initUi()
         requestNotificationPermissionIfNeeded()
     }
 
-    private fun initViews() {
-        txtBleState = findViewById(R.id.txtBleState)
-        txtReconnectState = findViewById(R.id.txtReconnectState)
-        txtConnectedDevice = findViewById(R.id.txtConnectedDevice)
-        txtData = findViewById(R.id.txtData)
-        txtRiskState = findViewById(R.id.txtRiskState)
-        txtRiskCommand = findViewById(R.id.txtRiskCommand)
-        txtFirebaseState = findViewById(R.id.txtFirebaseState)
-        txtLastUpdate = findViewById(R.id.txtLastUpdate)
-        btnScan = findViewById(R.id.btnScan)
-        btnDisconnect = findViewById(R.id.btnDisconnect)
-        btnFakeData = findViewById(R.id.btnFakeData)
-        listBle = findViewById(R.id.listBle)
-    }
-
+    // 기능별 매니저를 Activity에서 조립만 하고, 실제 세부 구현은 각 파일로 분리
     private fun initManagers() {
         bleManager = BleManager(this, this)
         alertManager = AlertManager(this)
+        riskLogPolicy = RiskLogPolicy()
+        foregroundServiceController = ForegroundServiceController(this)
     }
 
-    private fun initDeviceList() {
-        deviceAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, deviceInfoList)
-        listBle.adapter = deviceAdapter
+    private fun initUi() {
+        ui = MainUiController(this)
+        ui.showDefault(bleManager.isBluetoothAvailable())
+        ui.bindActions(
+            onScanClicked = { handleScanClicked() },
+            onDisconnectClicked = { handleDisconnectClicked() },
+            onFakeDataClicked = { handleFakeDataClicked() },
+            onDeviceClicked = { position -> handleDeviceClicked(position) }
+        )
     }
 
-    private fun initDefaultUi() {
-        txtBleState.text = "BLE 상태: 준비 중"
-        txtReconnectState.text = "재연결 상태: 대기"
-        txtConnectedDevice.text = "연결 장치: 없음"
-        txtData.text = "센서 데이터 없음"
-        txtRiskCommand.text = "ESP32 명령: 없음"
-        txtFirebaseState.text = "Firebase 상태: 대기"
-        txtLastUpdate.text = "마지막 업데이트: 없음"
-
-        txtBleState.text = if (bleManager.isBluetoothAvailable()) {
-            "BLE 상태: 준비 완료"
-        } else {
-            "BLE 상태: 사용 불가"
+    private fun handleScanClicked() {
+        // BLE 권한과 블루투스 상태를 확인한 뒤 Smart Shield 장치 스캔
+        if (!BlePermissionHelper.hasBlePermission(this)) {
+            BlePermissionHelper.requestBlePermission(this)
+            return
         }
 
-        updateRiskUI(RiskLevel.SAFE)
+        if (!bleManager.isBluetoothAvailable()) {
+            Toast.makeText(this, "블루투스를 지원하지 않는 기기입니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (!bleManager.isBluetoothEnabled()) {
+            Toast.makeText(this, "블루투스를 먼저 켜주세요.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        foundDeviceList.clear()
+        ui.clearScanList()
+        bleManager.startScan()
     }
 
-    private fun initListeners() {
-        btnScan.setOnClickListener {
-            if (!BlePermissionHelper.hasBlePermission(this)) {
-                BlePermissionHelper.requestBlePermission(this)
-                return@setOnClickListener
-            }
+    private fun handleDisconnectClicked() {
+        // 작업자가 직접 연결 해제를 누르면 세션 종료 상태를 Firebase에 반영합니다.
+        appSessionActive = false
+        bleManager.disconnectManually()
+        foregroundServiceController.stop()
+    }
 
-            if (!bleManager.isBluetoothAvailable()) {
-                Toast.makeText(this, "블루투스를 지원하지 않는 기기입니다.", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
+    private fun handleFakeDataClicked() {
+        // 실제 ESP32 없이 Firebase 업로드 흐름을 검증용 Test코드
+        appSessionActive = true
+        foregroundServiceController.startIfAllowed()
 
-            if (!bleManager.isBluetoothEnabled()) {
-                Toast.makeText(this, "블루투스를 먼저 켜주세요.", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
+        val fakeData = FakeSensorDataProvider.randomPayload()
+        Log.d(TAG, "Fake data generated: $fakeData")
+        handleReceivedData(fakeData)
+    }
 
-            clearScanList()
-            bleManager.startScan()
-        }
+    private fun handleDeviceClicked(position: Int) {
+        if (position < 0 || position >= foundDeviceList.size) return
 
-        btnDisconnect.setOnClickListener {
-            appSessionActive = false
-            bleManager.disconnectManually()
-            stopForegroundService()
-        }
-
-        btnFakeData.setOnClickListener {
-            appSessionActive = true
-            startForegroundService()
-
-            val fakeData = generateFakeSensorData()
-            Log.d(TAG, "Fake data generated: $fakeData")
-            handleReceivedData(fakeData)
-        }
-
-        listBle.setOnItemClickListener { _, _, position, _ ->
-            if (position < 0 || position >= foundDeviceList.size) return@setOnItemClickListener
-
-            appSessionActive = true
-            startForegroundService()
-            bleManager.connect(foundDeviceList[position].device)
-        }
+        appSessionActive = true
+        foregroundServiceController.startIfAllowed()
+        bleManager.connect(foundDeviceList[position].device)
     }
 
     override fun onScanStarted() {
-        runOnUiThread {
-            txtBleState.text = "BLE 상태: 스캔 중"
-            txtReconnectState.text = "재연결 상태: 대기"
-            txtConnectedDevice.text = "연결 장치: 없음"
-        }
+        ui.showBleStatus("BLE 상태: 스캔 중")
+        ui.showReconnectStatus("재연결 상태: 대기")
+        ui.showNoConnectedDevice()
     }
 
     override fun onScanStopped() {
-        runOnUiThread {
-            txtBleState.text = "BLE 상태: 스캔 종료"
-        }
+        ui.showBleStatus("BLE 상태: 스캔 종료")
     }
 
     override fun onScanFailed(errorCode: Int) {
-        runOnUiThread {
-            txtBleState.text = "BLE 상태: 스캔 실패($errorCode)"
-        }
+        ui.showBleStatus("BLE 상태: 스캔 실패($errorCode)")
     }
 
     override fun onDeviceFound(deviceInfo: BleManager.BleDeviceInfo) {
+        // SS_XXXX와 UUID 필터를 통과한 ESP32만 목록에 추가
         runOnUiThread {
-            if (foundDeviceList.any { it.address == deviceInfo.address }) {
-                return@runOnUiThread
-            }
+            if (foundDeviceList.any { it.address == deviceInfo.address }) return@runOnUiThread
 
             foundDeviceList.add(deviceInfo)
-            deviceInfoList.add("이름: ${deviceInfo.name}\n주소: ${deviceInfo.address}")
-            deviceAdapter.notifyDataSetChanged()
+            ui.addDevice(deviceInfo)
         }
     }
 
     override fun onBleStatusChanged(message: String) {
-        runOnUiThread {
-            txtBleState.text = message
-        }
+        ui.showBleStatus(message)
     }
 
     override fun onReconnectStatusChanged(message: String) {
-        runOnUiThread {
-            txtReconnectState.text = message
-        }
+        ui.showReconnectStatus(message)
     }
 
     override fun onConnected(deviceName: String, address: String) {
         appSessionActive = true
-        startForegroundService()
+        foregroundServiceController.startIfAllowed()
 
-        runOnUiThread {
-            txtBleState.text = "BLE 상태: 연결 성공"
-            txtReconnectState.text = "재연결 상태: 대기"
-            txtConnectedDevice.text = "연결 장치: $deviceName / $address"
-        }
+        ui.showBleStatus("BLE 상태: 연결 성공")
+        ui.showReconnectStatus("재연결 상태: 대기")
+        ui.showConnectedDevice(deviceName, address)
     }
 
     override fun onDisconnected(manual: Boolean) {
+        // BLE만 끊긴 상태와 앱 세션 종료 상태를 Firebase에서 구분할 수 있게 저장
         appSessionActive = !manual
         uploadLastStatus(bleConnected = false, appSessionActive = appSessionActive)
 
-        runOnUiThread {
-            txtBleState.text = if (manual) {
-                "BLE 상태: 수동 연결 해제"
-            } else {
-                "BLE 상태: 연결 끊김"
-            }
-            txtReconnectState.text = if (manual) {
-                "재연결 상태: 중지"
-            } else {
-                "재연결 상태: 시도 중"
-            }
-        }
+        ui.showBleStatus(if (manual) "BLE 상태: 수동 연결 해제" else "BLE 상태: 연결 끊김")
+        ui.showReconnectStatus(if (manual) "재연결 상태: 중지" else "재연결 상태: 시도 중")
 
         if (manual) {
-            stopForegroundService()
+            foregroundServiceController.stop()
         }
     }
 
@@ -245,20 +181,15 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
         appSessionActive = false
         uploadLastStatus(bleConnected = false, appSessionActive = false)
 
-        runOnUiThread {
-            txtBleState.text = "BLE 상태: 재연결 실패"
-            txtReconnectState.text = "재연결 상태: 10분 초과, 세션 종료"
-            txtConnectedDevice.text = "연결 장치: 없음"
-        }
-
-        stopForegroundService()
+        ui.showBleStatus("BLE 상태: 재연결 실패")
+        ui.showReconnectStatus("재연결 상태: 10분 초과, 세션 종료")
+        ui.showNoConnectedDevice()
+        foregroundServiceController.stop()
     }
 
     override fun onNotifyReady() {
-        runOnUiThread {
-            txtBleState.text = "BLE 상태: Notify 수신 준비 완료"
-            txtRiskCommand.text = "ESP32 명령: Write 준비 완료"
-        }
+        ui.showBleStatus("BLE 상태: Notify 수신 준비 완료")
+        ui.showRiskCommand("Write 준비 완료")
     }
 
     override fun onDataReceived(rawData: String) {
@@ -266,17 +197,11 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
     }
 
     override fun onWriteResult(command: String, started: Boolean, reason: String?) {
-        runOnUiThread {
-            txtRiskCommand.text = when {
-                started -> "ESP32 명령: $command 전송 시작"
-                command.isBlank() -> "ESP32 명령: Write 특성 없음"
-                reason == "duplicate" -> "ESP32 명령: $command 중복 생략"
-                else -> "ESP32 명령: $command 전송 실패($reason)"
-            }
-        }
+        ui.showWriteResult(command, started, reason)
     }
 
     private fun handleReceivedData(rawData: String) {
+        // 수신 문자열을 정리한 뒤 파싱, 위험도 계산, ESP32 제어, Firebase 업로드 순서로 처리
         val cleanedRawData = rawData.trim()
         Log.d(TAG, "Raw sensor data: $cleanedRawData")
 
@@ -298,9 +223,9 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
         lastRiskLevel = riskLevel
         lastRiskCommand = command
 
-        updateSensorUI(sensorData, riskLevel)
-        updateRiskUI(riskLevel)
-        updateCommandUI(command)
+        ui.showSensorData(sensorData, riskLevel, formatNow())
+        ui.showRisk(riskLevel)
+        ui.showRiskCommand(command)
 
         bleManager.writeRiskCommand(command)
         uploadCurrentStatus(sensorData, riskLevel, command)
@@ -313,15 +238,18 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
         riskLevel: RiskLevel,
         command: String
     ) {
-        txtFirebaseState.text = "Firebase 상태: currentStatus 업로드 중"
+        // currentStatus는 관리자 앱이 실시간 상태를 읽는 덮어쓰기 경로
+        ui.showFirebaseState("Firebase 상태: currentStatus 업로드 중")
 
         FirebaseStatusUploader.uploadCurrentStatus(
             workerId = sensorData.id,
             deviceName = bleManager.connectedDeviceName,
             temp = sensorData.temp,
             hr = sensorData.hr,
+            spo2 = sensorData.spo2,
             env = sensorData.env,
             hum = sensorData.hum.toDouble(),
+            lux = sensorData.lux,
             posture = sensorData.posture,
             riskLevel = riskLevel.label,
             riskCommand = command,
@@ -329,7 +257,7 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
             appSessionActive = appSessionActive
         )
 
-        txtFirebaseState.text = "Firebase 상태: currentStatus 호출 완료"
+        ui.showFirebaseState("Firebase 상태: currentStatus 호출 완료")
     }
 
     private fun uploadRiskLogIfNeeded(
@@ -337,22 +265,8 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
         riskLevel: RiskLevel,
         command: String
     ) {
-        val shouldLog = riskLevel == RiskLevel.DANGER || riskLevel == RiskLevel.EMERGENCY
-
-        if (!shouldLog) {
-            if (lastLoggedRiskLevel != null) {
-                Log.d(FIREBASE_TAG, "riskLog duplicate guard reset")
-            }
-            lastLoggedRiskLevel = null
-            return
-        }
-
-        if (lastLoggedRiskLevel == riskLevel) {
-            Log.d(FIREBASE_TAG, "riskLog skipped. Duplicate riskLevel=${riskLevel.name}")
-            return
-        }
-
-        lastLoggedRiskLevel = riskLevel
+        // riskLogs는 위험/응급 이벤트만 중복 없이 누적 저장
+        if (!riskLogPolicy.shouldUpload(riskLevel)) return
 
         FirebaseStatusUploader.uploadRiskLog(
             workerId = sensorData.id,
@@ -360,23 +274,22 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
             riskCommand = command,
             temp = sensorData.temp,
             hr = sensorData.hr,
+            spo2 = sensorData.spo2,
             env = sensorData.env,
             hum = sensorData.hum.toDouble(),
+            lux = sensorData.lux,
             posture = sensorData.posture,
-            message = when (riskLevel) {
-                RiskLevel.DANGER -> "위험 상태 감지"
-                RiskLevel.EMERGENCY -> "응급 상태 감지"
-                else -> "상태 감지"
-            }
+            message = riskLogPolicy.messageFor(riskLevel)
         )
 
-        txtFirebaseState.text = "Firebase 상태: riskLogs 호출 완료"
+        ui.showFirebaseState("Firebase 상태: riskLogs 호출 완료")
     }
 
     private fun uploadLastStatus(
         bleConnected: Boolean,
         appSessionActive: Boolean
     ) {
+        // 연결 해제나 앱 종료 시 마지막 센서값을 기준으로 연결 상태만 갱신
         val sensorData = lastSensorData ?: return
 
         FirebaseStatusUploader.uploadCurrentStatus(
@@ -384,8 +297,10 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
             deviceName = bleManager.connectedDeviceName,
             temp = sensorData.temp,
             hr = sensorData.hr,
+            spo2 = sensorData.spo2,
             env = sensorData.env,
             hum = sensorData.hum.toDouble(),
+            lux = sensorData.lux,
             posture = sensorData.posture,
             riskLevel = lastRiskLevel.label,
             riskCommand = lastRiskCommand,
@@ -394,114 +309,14 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
         )
     }
 
-    private fun updateSensorUI(sensorData: SensorData, riskLevel: RiskLevel) {
-        val display = """
-            workerId: ${sensorData.id}
-            TEMP 피부 온도: ${sensorData.temp}
-            HR 심박수: ${sensorData.hr}
-            ENV 주변 온도: ${sensorData.env}
-            HUM 습도: ${sensorData.hum}
-            POSTURE 자세: ${sensorData.posture}
-            위험 단계: ${riskLevel.label}
-        """.trimIndent()
-
-        runOnUiThread {
-            txtData.text = display
-            txtLastUpdate.text = "마지막 업데이트: ${formatNow()}"
-        }
-    }
-
-    private fun updateRiskUI(riskLevel: RiskLevel) {
-        runOnUiThread {
-            txtRiskState.text = "상태: ${riskLevel.label}"
-
-            val color = when (riskLevel) {
-                RiskLevel.SAFE -> "#2E7D32"
-                RiskLevel.CAUTION -> "#F9A825"
-                RiskLevel.DANGER -> "#D32F2F"
-                RiskLevel.EMERGENCY -> "#B71C1C"
-                RiskLevel.ERROR -> "#777777"
-            }
-
-            txtRiskState.setBackgroundColor(Color.parseColor(color))
-        }
-    }
-
-    private fun updateCommandUI(command: String) {
-        runOnUiThread {
-            txtRiskCommand.text = "ESP32 명령: $command"
-        }
-    }
-
     private fun showParseError(rawData: String) {
         Log.w(TAG, "Sensor parse failed. rawData=$rawData")
-
-        runOnUiThread {
-            txtData.text = """
-                데이터 파싱 오류
-
-                수신 원본:
-                $rawData
-            """.trimIndent()
-            txtRiskState.text = "상태: 오류"
-            txtRiskState.setBackgroundColor(Color.parseColor("#777777"))
-            txtFirebaseState.text = "Firebase 상태: 파싱 실패로 업로드 안 함"
-        }
-    }
-
-    private fun clearScanList() {
-        foundDeviceList.clear()
-        deviceInfoList.clear()
-        deviceAdapter.notifyDataSetChanged()
-    }
-
-    private fun generateFakeSensorData(): String {
-        val fakeSamples = listOf(
-            "ID:0001,TEMP:36.5,HR:82,ENV:28.5,HUM:55,POSTURE:NORMAL",
-            "ID:0001,TEMP:37.6,HR:105,ENV:31.5,HUM:72,POSTURE:NORMAL",
-            "ID:0001,TEMP:38.1,HR:125,ENV:34.2,HUM:81,POSTURE:WARNING",
-            "ID:0001,TEMP:37.8,HR:130,ENV:35.5,HUM:85,POSTURE:FALL",
-            "ID:0001,TEMP:38.5,HR:140,ENV:36.0,HUM:88,POSTURE:EMERGENCY"
-        )
-        return fakeSamples.random()
-    }
-
-    private fun startForegroundService() {
-        if (!BlePermissionHelper.hasConnectPermission(this)) {
-            Log.w(TAG, "Foreground service start skipped. BLUETOOTH_CONNECT permission is missing.")
-            return
-        }
-
-        val intent = Intent(this, SmartShieldForegroundService::class.java).apply {
-            action = SmartShieldForegroundService.ACTION_START
-        }
-
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                ContextCompat.startForegroundService(this, intent)
-            } else {
-                startService(intent)
-            }
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "Foreground service start failed", e)
-        }
-    }
-
-    private fun stopForegroundService() {
-        val intent = Intent(this, SmartShieldForegroundService::class.java).apply {
-            action = SmartShieldForegroundService.ACTION_STOP
-        }
-        try {
-            startService(intent)
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "Foreground service stop failed", e)
-        }
+        ui.showParseError(rawData)
     }
 
     private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            return
-        }
+        // Android 13 이상은 Foreground Service 알림 표시를 위해 알림 권한을 요청
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
 
         val granted = ContextCompat.checkSelfPermission(
             this,
@@ -524,10 +339,11 @@ class MainActivity : AppCompatActivity(), BleManager.Listener {
     override fun onDestroy() {
         super.onDestroy()
 
+        // 앱 화면이 종료되면 세션 종료 상태를 Firebase에 남기고 BLE 리소스를 정리
         appSessionActive = false
         uploadLastStatus(bleConnected = false, appSessionActive = false)
         bleManager.release()
-        stopForegroundService()
+        foregroundServiceController.stop()
     }
 
     override fun onRequestPermissionsResult(

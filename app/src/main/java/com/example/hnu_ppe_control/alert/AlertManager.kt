@@ -1,3 +1,4 @@
+// Smart Shield 위험 단계별 사용자 팝업과 스마트폰 진동 알림을 담당하는 파일
 package com.example.hnu_ppe_control.alert
 
 import android.app.AlertDialog
@@ -5,16 +6,24 @@ import android.content.Context
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.os.VibratorManager
 import com.example.hnu_ppe_control.data.RiskLevel
 
 class AlertManager(
     private val context: Context
 ) {
-    private val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+    private val vibrator: Vibrator =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            context.getSystemService(VibratorManager::class.java).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        }
 
     private var showingRiskLevel: RiskLevel? = null
 
     fun handleRisk(riskLevel: RiskLevel) {
+        // 정상으로 돌아오면 같은 단계 Alert 중복 방지 상태를 초기화
         when (riskLevel) {
             RiskLevel.SAFE, RiskLevel.ERROR -> {
                 showingRiskLevel = null
@@ -55,6 +64,7 @@ class AlertManager(
         message: String,
         vibrationTime: Long
     ) {
+        // 같은 위험 단계에서는 팝업과 진동을 반복하지 않습니다.
         if (showingRiskLevel == riskLevel) {
             return
         }
@@ -72,6 +82,7 @@ class AlertManager(
     }
 
     private fun vibrate(duration: Long) {
+        // Android 버전에 맞는 진동 API를 사용합니다.
         if (!vibrator.hasVibrator()) {
             return
         }
