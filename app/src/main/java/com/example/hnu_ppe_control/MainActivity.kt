@@ -1,16 +1,11 @@
 package com.example.hnu_ppe_control
 
-import android.bluetooth.*
-import android.bluetooth.le.BluetoothLeScanner
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanRecord
-import android.bluetooth.le.ScanResult
+import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -18,8 +13,11 @@ import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.example.hnu_ppe_control.alert.AlertManager
 import com.example.hnu_ppe_control.ble.BleConstants
+import com.example.hnu_ppe_control.ble.BleManager
 import com.example.hnu_ppe_control.ble.BlePermissionHelper
 import com.example.hnu_ppe_control.data.RiskLevel
 import com.example.hnu_ppe_control.data.SensorData
@@ -27,57 +25,44 @@ import com.example.hnu_ppe_control.firebase.FirebaseStatusUploader
 import com.example.hnu_ppe_control.parser.SensorDataParser
 import com.example.hnu_ppe_control.risk.HeatstrokeAnalyzer
 import com.example.hnu_ppe_control.risk.RiskCommandMapper
-import java.nio.charset.StandardCharsets
+import com.example.hnu_ppe_control.service.SmartShieldForegroundService
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), BleManager.Listener {
 
     companion object {
         private const val TAG = "SmartShieldBLE"
+        private const val FIREBASE_TAG = "SmartShieldFirebase"
+        private const val REQUEST_NOTIFICATION_PERMISSION = 2001
     }
 
     private lateinit var txtBleState: TextView
+    private lateinit var txtReconnectState: TextView
     private lateinit var txtConnectedDevice: TextView
     private lateinit var txtData: TextView
     private lateinit var txtRiskState: TextView
+    private lateinit var txtRiskCommand: TextView
+    private lateinit var txtFirebaseState: TextView
+    private lateinit var txtLastUpdate: TextView
     private lateinit var btnScan: Button
+    private lateinit var btnDisconnect: Button
     private lateinit var btnFakeData: Button
     private lateinit var listBle: ListView
 
-    private var bluetoothAdapter: BluetoothAdapter? = null
-    private var bluetoothLeScanner: BluetoothLeScanner? = null
-    private var bluetoothGatt: BluetoothGatt? = null
-
-    private var isBleConnected = false
-    private var isServiceDiscovered = false
-    private var isNotifyReady = false
-
-    private var lastConnectedDevice: BluetoothDevice? = null
-    private var connectedDeviceAddress: String? = null
-    private var connectedDeviceName: String = "Unknown"
-
-    private var isReconnecting = false
-    private var reconnectStartTime = 0L
-    private val reconnectIntervalMs = 3000L
-    private val reconnectMaxDurationMs = 10 * 60 * 1000L
-
-    private var lastDataReceivedTime = 0L
-    private val unstableTimeoutMs = 10 * 1000L
-    private val offlineTimeoutMs = 30 * 1000L
-    private var isOfflineCheckerRunning = false
-
-    private var lastSentRiskCommand: String? = null
-    private var lastAlertRiskLevel: RiskLevel? = null
-
-    private var appSessionActive = false
-
+    private lateinit var bleManager: BleManager
     private lateinit var alertManager: AlertManager
-
-    private val handler = Handler(Looper.getMainLooper())
-    private var isScanning = false
+    private lateinit var deviceAdapter: ArrayAdapter<String>
 
     private val deviceInfoList = ArrayList<String>()
-    private val foundDeviceList = ArrayList<BluetoothDevice>()
-    private lateinit var deviceAdapter: ArrayAdapter<String>
+    private val foundDeviceList = ArrayList<BleManager.BleDeviceInfo>()
+
+    private var appSessionActive = false
+    private var lastLoggedRiskLevel: RiskLevel? = null
+    private var lastSensorData: SensorData? = null
+    private var lastRiskLevel: RiskLevel = RiskLevel.SAFE
+    private var lastRiskCommand: String = "RISK:SAFE"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -87,50 +72,51 @@ class MainActivity : AppCompatActivity() {
         initManagers()
         initDeviceList()
         initDefaultUi()
-        initBluetooth()
         initListeners()
+        requestNotificationPermissionIfNeeded()
     }
 
     private fun initViews() {
         txtBleState = findViewById(R.id.txtBleState)
+        txtReconnectState = findViewById(R.id.txtReconnectState)
         txtConnectedDevice = findViewById(R.id.txtConnectedDevice)
         txtData = findViewById(R.id.txtData)
         txtRiskState = findViewById(R.id.txtRiskState)
+        txtRiskCommand = findViewById(R.id.txtRiskCommand)
+        txtFirebaseState = findViewById(R.id.txtFirebaseState)
+        txtLastUpdate = findViewById(R.id.txtLastUpdate)
         btnScan = findViewById(R.id.btnScan)
+        btnDisconnect = findViewById(R.id.btnDisconnect)
         btnFakeData = findViewById(R.id.btnFakeData)
         listBle = findViewById(R.id.listBle)
     }
 
     private fun initManagers() {
+        bleManager = BleManager(this, this)
         alertManager = AlertManager(this)
     }
 
     private fun initDeviceList() {
-        deviceAdapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_list_item_1,
-            deviceInfoList
-        )
+        deviceAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, deviceInfoList)
         listBle.adapter = deviceAdapter
     }
 
     private fun initDefaultUi() {
-        txtRiskState.text = "상태 : 대기중"
-        txtRiskState.setBackgroundColor(Color.parseColor("#777777"))
-        txtConnectedDevice.text = "연결 장치 : 없음"
-        txtData.text = "데이터 없음"
-    }
+        txtBleState.text = "BLE 상태: 준비 중"
+        txtReconnectState.text = "재연결 상태: 대기"
+        txtConnectedDevice.text = "연결 장치: 없음"
+        txtData.text = "센서 데이터 없음"
+        txtRiskCommand.text = "ESP32 명령: 없음"
+        txtFirebaseState.text = "Firebase 상태: 대기"
+        txtLastUpdate.text = "마지막 업데이트: 없음"
 
-    private fun initBluetooth() {
-        val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager
-        bluetoothAdapter = bluetoothManager?.adapter
-        bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
-
-        txtBleState.text = if (bluetoothAdapter == null) {
-            "BLE 사용 불가"
+        txtBleState.text = if (bleManager.isBluetoothAvailable()) {
+            "BLE 상태: 준비 완료"
         } else {
-            "BLE 준비 완료"
+            "BLE 상태: 사용 불가"
         }
+
+        updateRiskUI(RiskLevel.SAFE)
     }
 
     private fun initListeners() {
@@ -140,20 +126,30 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
 
-            if (bluetoothAdapter == null) {
+            if (!bleManager.isBluetoothAvailable()) {
                 Toast.makeText(this, "블루투스를 지원하지 않는 기기입니다.", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
 
-            if (bluetoothAdapter?.isEnabled == false) {
+            if (!bleManager.isBluetoothEnabled()) {
                 Toast.makeText(this, "블루투스를 먼저 켜주세요.", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
 
-            startBleScan()
+            clearScanList()
+            bleManager.startScan()
+        }
+
+        btnDisconnect.setOnClickListener {
+            appSessionActive = false
+            bleManager.disconnectManually()
+            stopForegroundService()
         }
 
         btnFakeData.setOnClickListener {
+            appSessionActive = true
+            startForegroundService()
+
             val fakeData = generateFakeSensorData()
             Log.d(TAG, "Fake data generated: $fakeData")
             handleReceivedData(fakeData)
@@ -161,420 +157,127 @@ class MainActivity : AppCompatActivity() {
 
         listBle.setOnItemClickListener { _, _, position, _ ->
             if (position < 0 || position >= foundDeviceList.size) return@setOnItemClickListener
-            connectToDevice(foundDeviceList[position])
+
+            appSessionActive = true
+            startForegroundService()
+            bleManager.connect(foundDeviceList[position].device)
         }
     }
 
-    private fun startBleScan() {
-        if (bluetoothLeScanner == null) {
-            Log.e(TAG, "BLE scanner is null")
-            Toast.makeText(this, "BLE 스캐너를 사용할 수 없습니다.", Toast.LENGTH_SHORT).show()
-            return
+    override fun onScanStarted() {
+        runOnUiThread {
+            txtBleState.text = "BLE 상태: 스캔 중"
+            txtReconnectState.text = "재연결 상태: 대기"
+            txtConnectedDevice.text = "연결 장치: 없음"
         }
-
-        if (isScanning) {
-            Log.w(TAG, "Scan already running")
-            Toast.makeText(this, "이미 스캔 중입니다.", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        if (!BlePermissionHelper.hasScanPermission(this)) {
-            Log.e(TAG, "Missing BLUETOOTH_SCAN permission")
-            Toast.makeText(this, "BLE 스캔 권한이 필요합니다.", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        deviceInfoList.clear()
-        foundDeviceList.clear()
-        deviceAdapter.notifyDataSetChanged()
-
-        txtBleState.text = "BLE 스캔 중..."
-        txtConnectedDevice.text = "연결 장치 : 없음"
-
-        isScanning = true
-
-        try {
-            bluetoothLeScanner?.startScan(scanCallback)
-            Log.d(TAG, "BLE scan started")
-        } catch (e: SecurityException) {
-            isScanning = false
-            Log.e(TAG, "startScan failed by permission", e)
-            Toast.makeText(this, "BLE 스캔 권한 오류", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        handler.postDelayed({
-            if (isScanning) {
-                Log.d(TAG, "BLE scan timeout reached")
-                stopBleScan()
-            }
-        }, BleConstants.SCAN_PERIOD)
     }
 
-    private fun stopBleScan() {
-        if (
-            bluetoothLeScanner != null &&
-            isScanning &&
-            BlePermissionHelper.hasScanPermission(this)
-        ) {
-            try {
-                bluetoothLeScanner?.stopScan(scanCallback)
-                Log.d(TAG, "BLE scan stopped")
-            } catch (e: SecurityException) {
-                Log.e(TAG, "stopScan failed by permission", e)
-            }
+    override fun onScanStopped() {
+        runOnUiThread {
+            txtBleState.text = "BLE 상태: 스캔 종료"
         }
-
-        isScanning = false
-        txtBleState.text = "스캔 종료"
     }
 
-    private val scanCallback = object : ScanCallback() {
+    override fun onScanFailed(errorCode: Int) {
+        runOnUiThread {
+            txtBleState.text = "BLE 상태: 스캔 실패($errorCode)"
+        }
+    }
 
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            super.onScanResult(callbackType, result)
-
-            val device = result.device ?: return
-            val scanRecord: ScanRecord = result.scanRecord ?: return
-
-            if (!hasTargetServiceUuid(scanRecord)) {
-                Log.d(TAG, "Ignored device without target UUID")
-                return
+    override fun onDeviceFound(deviceInfo: BleManager.BleDeviceInfo) {
+        runOnUiThread {
+            if (foundDeviceList.any { it.address == deviceInfo.address }) {
+                return@runOnUiThread
             }
 
-            if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) {
-                Log.e(TAG, "Missing BLUETOOTH_CONNECT permission while reading scan result")
-                return
-            }
-
-            val deviceName = try {
-                device.name?.takeIf { it.isNotBlank() } ?: "이름 없는 기기"
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Cannot read device name", e)
-                "이름 없는 기기"
-            }
-
-            val deviceAddress = try {
-                device.address
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Cannot read device address", e)
-                return
-            }
-
-            if (foundDeviceList.any { it.address == deviceAddress }) {
-                Log.d(TAG, "Duplicate device ignored: $deviceName / $deviceAddress")
-                return
-            }
-
-            val deviceInfo = "이름 : $deviceName\n주소 : $deviceAddress"
-
-            foundDeviceList.add(device)
-            deviceInfoList.add(deviceInfo)
+            foundDeviceList.add(deviceInfo)
+            deviceInfoList.add("이름: ${deviceInfo.name}\n주소: ${deviceInfo.address}")
             deviceAdapter.notifyDataSetChanged()
-
-            Log.d(TAG, "Target BLE device found: $deviceName / $deviceAddress")
-        }
-
-        override fun onScanFailed(errorCode: Int) {
-            super.onScanFailed(errorCode)
-
-            isScanning = false
-
-            runOnUiThread {
-                txtBleState.text = "스캔 실패: $errorCode"
-            }
-
-            Log.e(TAG, "BLE scan failed. errorCode=$errorCode")
         }
     }
 
-    private fun hasTargetServiceUuid(scanRecord: ScanRecord): Boolean {
-        val serviceUuids = scanRecord.serviceUuids ?: return false
-        return serviceUuids.any { it.uuid == BleConstants.TARGET_SERVICE_UUID }
-    }
-
-    private fun connectToDevice(device: BluetoothDevice) {
-        stopBleScan()
-
-        if (!BlePermissionHelper.hasConnectPermission(this)) {
-            Log.e(TAG, "Missing BLUETOOTH_CONNECT permission. Cannot connect.")
-            Toast.makeText(this, "BLE 연결 권한이 필요합니다.", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val deviceAddress = try {
-            device.address
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Cannot read device address", e)
-            Toast.makeText(this, "BLE 장치 정보를 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val deviceName = try {
-            device.name?.takeIf { it.isNotBlank() } ?: "Unknown"
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Cannot read device name", e)
-            "Unknown"
-        }
-
-        resetBleStateFlags()
-
-        lastConnectedDevice = device
-        connectedDeviceAddress = deviceAddress
-        connectedDeviceName = deviceName
-
-        txtBleState.text = "연결 시도 중..."
-        txtConnectedDevice.text = "연결 장치 : $deviceAddress"
-
-        Log.d(TAG, "Connecting to device: $deviceAddress / $deviceName")
-
-        try {
-            bluetoothGatt?.close()
-            bluetoothGatt = null
-            bluetoothGatt = device.connectGatt(this, false, gattCallback)
-        } catch (e: SecurityException) {
-            Log.e(TAG, "connectGatt failed by permission", e)
-            Toast.makeText(this, "BLE 연결 권한 오류", Toast.LENGTH_SHORT).show()
+    override fun onBleStatusChanged(message: String) {
+        runOnUiThread {
+            txtBleState.text = message
         }
     }
 
-    private val gattCallback = object : BluetoothGattCallback() {
-
-        override fun onConnectionStateChange(
-            gatt: BluetoothGatt,
-            status: Int,
-            newState: Int
-        ) {
-            super.onConnectionStateChange(gatt, status, newState)
-
-            Log.d(TAG, "onConnectionStateChange: status=$status, newState=$newState")
-
-            when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> {
-                    isBleConnected = true
-                    isServiceDiscovered = false
-                    isNotifyReady = false
-                    appSessionActive = true
-
-                    stopReconnect()
-                    startOfflineChecker()
-
-                    runOnUiThread {
-                        txtBleState.text = "BLE 연결 성공"
-                        txtConnectedDevice.text =
-                            "연결 장치 : ${connectedDeviceAddress ?: "알 수 없음"}"
-
-                        Toast.makeText(
-                            this@MainActivity,
-                            "장치 연결 성공",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-
-                    if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) {
-                        Log.e(TAG, "Missing BLUETOOTH_CONNECT permission. Cannot discover services.")
-                        return
-                    }
-
-                    try {
-                        val discoverStarted = gatt.discoverServices()
-                        Log.d(TAG, "discoverServices started=$discoverStarted")
-                    } catch (e: SecurityException) {
-                        Log.e(TAG, "discoverServices failed by permission", e)
-                    }
-                }
-
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.w(TAG, "BLE disconnected. status=$status")
-
-                    isBleConnected = false
-                    isServiceDiscovered = false
-                    isNotifyReady = false
-                    appSessionActive = true
-
-                    lastSentRiskCommand = null
-                    lastAlertRiskLevel = null
-
-                    runOnUiThread {
-                        txtBleState.text = "BLE 연결 끊김 - 재연결 시도 중"
-                        txtConnectedDevice.text =
-                            "마지막 장치 : ${connectedDeviceAddress ?: "없음"}"
-                    }
-
-                    startReconnect()
-                }
-            }
-        }
-
-        override fun onServicesDiscovered(
-            gatt: BluetoothGatt,
-            status: Int
-        ) {
-            super.onServicesDiscovered(gatt, status)
-
-            Log.d(TAG, "onServicesDiscovered: status=$status")
-
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                isServiceDiscovered = false
-                isNotifyReady = false
-
-                runOnUiThread {
-                    txtBleState.text = "서비스 탐색 실패"
-                }
-
-                Log.e(TAG, "Service discovery failed. status=$status")
-                return
-            }
-
-            val targetService = gatt.getService(BleConstants.TARGET_SERVICE_UUID)
-
-            if (targetService == null) {
-                isServiceDiscovered = false
-                isNotifyReady = false
-
-                runOnUiThread {
-                    txtBleState.text = "서비스 없음"
-                }
-
-                Log.e(TAG, "Target service not found: ${BleConstants.TARGET_SERVICE_UUID}")
-                return
-            }
-
-            isServiceDiscovered = true
-
-            val dataCharacteristic =
-                targetService.getCharacteristic(BleConstants.DATA_CHARACTERISTIC_UUID)
-
-            if (dataCharacteristic == null) {
-                isNotifyReady = false
-
-                runOnUiThread {
-                    txtBleState.text = "데이터 Characteristic 없음"
-                }
-
-                Log.e(TAG, "Data characteristic not found: ${BleConstants.DATA_CHARACTERISTIC_UUID}")
-                return
-            }
-
-            if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) {
-                isNotifyReady = false
-                Log.e(TAG, "Missing BLUETOOTH_CONNECT permission. Cannot enable notify.")
-                return
-            }
-
-            val notifySuccess = try {
-                gatt.setCharacteristicNotification(dataCharacteristic, true)
-            } catch (e: SecurityException) {
-                Log.e(TAG, "setCharacteristicNotification failed by permission", e)
-                false
-            }
-
-            val descriptor =
-                dataCharacteristic.getDescriptor(BleConstants.CLIENT_CHARACTERISTIC_CONFIG_UUID)
-
-            if (descriptor == null) {
-                isNotifyReady = false
-
-                runOnUiThread {
-                    txtBleState.text = "CCCD 없음"
-                }
-
-                Log.e(TAG, "CCCD descriptor not found: ${BleConstants.CLIENT_CHARACTERISTIC_CONFIG_UUID}")
-                return
-            }
-
-            val descriptorWriteStarted: Boolean =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    try {
-                        val result = gatt.writeDescriptor(
-                            descriptor,
-                            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                        )
-
-                        result == BluetoothStatusCodes.SUCCESS
-                    } catch (e: SecurityException) {
-                        Log.e(TAG, "writeDescriptor failed by permission", e)
-                        false
-                    }
-                } else {
-                    try {
-                        @Suppress("DEPRECATION")
-                        descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-
-                        @Suppress("DEPRECATION")
-                        gatt.writeDescriptor(descriptor)
-                    } catch (e: SecurityException) {
-                        Log.e(TAG, "writeDescriptor legacy failed by permission", e)
-                        false
-                    }
-                }
-
-            isNotifyReady = notifySuccess && descriptorWriteStarted
-
-            runOnUiThread {
-                txtBleState.text = if (isNotifyReady) {
-                    "데이터 수신 준비 완료"
-                } else {
-                    "Notify 설정 실패"
-                }
-
-                if (isNotifyReady) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "서비스 탐색 완료",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
-
-            Log.d(
-                TAG,
-                "BLE ready states: connected=$isBleConnected, serviceDiscovered=$isServiceDiscovered, notifyReady=$isNotifyReady"
-            )
-        }
-
-        @Suppress("DEPRECATION")
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            super.onCharacteristicChanged(gatt, characteristic)
-
-            if (characteristic.uuid == BleConstants.DATA_CHARACTERISTIC_UUID) {
-                val data = characteristic.value ?: return
-                val received = String(data, StandardCharsets.UTF_8)
-
-                lastDataReceivedTime = System.currentTimeMillis()
-
-                Log.d(TAG, "Notify received: $received")
-
-                handleReceivedData(received)
-            }
+    override fun onReconnectStatusChanged(message: String) {
+        runOnUiThread {
+            txtReconnectState.text = message
         }
     }
 
-    private fun generateFakeSensorData(): String {
-        val fakeSamples = listOf(
-            "ID:0001,TEMP:36.5,HR:82,ENV:28.5,HUM:55,POSTURE:NORMAL",
-            "ID:0001,TEMP:37.6,HR:105,ENV:31.5,HUM:72,POSTURE:NORMAL",
-            "ID:0001,TEMP:38.1,HR:125,ENV:34.2,HUM:81,POSTURE:WARNING",
-            "ID:0001,TEMP:37.8,HR:130,ENV:35.5,HUM:85,POSTURE:FALL",
-            "ID:0001,TEMP:38.5,HR:140,ENV:36.0,HUM:88,POSTURE:EMERGENCY"
-        )
+    override fun onConnected(deviceName: String, address: String) {
+        appSessionActive = true
+        startForegroundService()
 
-        return fakeSamples.random()
+        runOnUiThread {
+            txtBleState.text = "BLE 상태: 연결 성공"
+            txtReconnectState.text = "재연결 상태: 대기"
+            txtConnectedDevice.text = "연결 장치: $deviceName / $address"
+        }
+    }
+
+    override fun onDisconnected(manual: Boolean) {
+        appSessionActive = !manual
+        uploadLastStatus(bleConnected = false, appSessionActive = appSessionActive)
+
+        runOnUiThread {
+            txtBleState.text = if (manual) {
+                "BLE 상태: 수동 연결 해제"
+            } else {
+                "BLE 상태: 연결 끊김"
+            }
+            txtReconnectState.text = if (manual) {
+                "재연결 상태: 중지"
+            } else {
+                "재연결 상태: 시도 중"
+            }
+        }
+
+        if (manual) {
+            stopForegroundService()
+        }
+    }
+
+    override fun onReconnectFailed() {
+        appSessionActive = false
+        uploadLastStatus(bleConnected = false, appSessionActive = false)
+
+        runOnUiThread {
+            txtBleState.text = "BLE 상태: 재연결 실패"
+            txtReconnectState.text = "재연결 상태: 10분 초과, 세션 종료"
+            txtConnectedDevice.text = "연결 장치: 없음"
+        }
+
+        stopForegroundService()
+    }
+
+    override fun onNotifyReady() {
+        runOnUiThread {
+            txtBleState.text = "BLE 상태: Notify 수신 준비 완료"
+            txtRiskCommand.text = "ESP32 명령: Write 준비 완료"
+        }
+    }
+
+    override fun onDataReceived(rawData: String) {
+        handleReceivedData(rawData)
+    }
+
+    override fun onWriteResult(command: String, started: Boolean, reason: String?) {
+        runOnUiThread {
+            txtRiskCommand.text = when {
+                started -> "ESP32 명령: $command 전송 시작"
+                command.isBlank() -> "ESP32 명령: Write 특성 없음"
+                reason == "duplicate" -> "ESP32 명령: $command 중복 생략"
+                else -> "ESP32 명령: $command 전송 실패($reason)"
+            }
+        }
     }
 
     private fun handleReceivedData(rawData: String) {
-        if (!isBleConnected || !isNotifyReady) {
-            Log.w(
-                TAG,
-                "Received data while BLE is not fully ready. connected=$isBleConnected, notifyReady=$isNotifyReady"
-            )
-        }
-
         val cleanedRawData = rawData.trim()
-
         Log.d(TAG, "Raw sensor data: $cleanedRawData")
 
         if (cleanedRawData.isEmpty()) {
@@ -583,7 +286,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         val sensorData = SensorDataParser.parse(cleanedRawData)
-
         if (sensorData == null) {
             showParseError(cleanedRawData)
             return
@@ -592,62 +294,126 @@ class MainActivity : AppCompatActivity() {
         val riskLevel = HeatstrokeAnalyzer.analyze(sensorData)
         val command = RiskCommandMapper.toCommand(riskLevel)
 
+        lastSensorData = sensorData
+        lastRiskLevel = riskLevel
+        lastRiskCommand = command
+
         updateSensorUI(sensorData, riskLevel)
         updateRiskUI(riskLevel)
+        updateCommandUI(command)
 
-        sendRiskCommandToEsp32(command)
-
-        try {
-            Log.d("SmartShieldFirebase", "Firebase upload attempt START")
-
-            FirebaseStatusUploader.uploadCurrentStatus(
-                workerId = sensorData.id,
-                deviceName = connectedDeviceName,
-                temp = sensorData.temp,
-                hr = sensorData.hr,
-                env = sensorData.env,
-                hum = sensorData.hum.toDouble(),
-                posture = sensorData.posture,
-                riskLevel = riskLevel.label,
-                riskCommand = command,
-                bleConnected = isBleConnected,
-                appSessionActive = appSessionActive
-            )
-
-            Log.d("SmartShieldFirebase", "Firebase upload function CALLED")
-
-        } catch (e: Exception) {
-            Log.e("SmartShieldFirebase", "Firebase upload exception", e)
-        }
-
-        if (riskLevel != lastAlertRiskLevel) {
-            alertManager.handleRisk(riskLevel)
-            lastAlertRiskLevel = riskLevel
-        }
+        bleManager.writeRiskCommand(command)
+        uploadCurrentStatus(sensorData, riskLevel, command)
+        uploadRiskLogIfNeeded(sensorData, riskLevel, command)
+        alertManager.handleRisk(riskLevel)
     }
 
-    private fun updateSensorUI(
+    private fun uploadCurrentStatus(
         sensorData: SensorData,
-        riskLevel: RiskLevel
+        riskLevel: RiskLevel,
+        command: String
     ) {
+        txtFirebaseState.text = "Firebase 상태: currentStatus 업로드 중"
+
+        FirebaseStatusUploader.uploadCurrentStatus(
+            workerId = sensorData.id,
+            deviceName = bleManager.connectedDeviceName,
+            temp = sensorData.temp,
+            hr = sensorData.hr,
+            env = sensorData.env,
+            hum = sensorData.hum.toDouble(),
+            posture = sensorData.posture,
+            riskLevel = riskLevel.label,
+            riskCommand = command,
+            bleConnected = bleManager.isBleConnected,
+            appSessionActive = appSessionActive
+        )
+
+        txtFirebaseState.text = "Firebase 상태: currentStatus 호출 완료"
+    }
+
+    private fun uploadRiskLogIfNeeded(
+        sensorData: SensorData,
+        riskLevel: RiskLevel,
+        command: String
+    ) {
+        val shouldLog = riskLevel == RiskLevel.DANGER || riskLevel == RiskLevel.EMERGENCY
+
+        if (!shouldLog) {
+            if (lastLoggedRiskLevel != null) {
+                Log.d(FIREBASE_TAG, "riskLog duplicate guard reset")
+            }
+            lastLoggedRiskLevel = null
+            return
+        }
+
+        if (lastLoggedRiskLevel == riskLevel) {
+            Log.d(FIREBASE_TAG, "riskLog skipped. Duplicate riskLevel=${riskLevel.name}")
+            return
+        }
+
+        lastLoggedRiskLevel = riskLevel
+
+        FirebaseStatusUploader.uploadRiskLog(
+            workerId = sensorData.id,
+            riskLevel = riskLevel.label,
+            riskCommand = command,
+            temp = sensorData.temp,
+            hr = sensorData.hr,
+            env = sensorData.env,
+            hum = sensorData.hum.toDouble(),
+            posture = sensorData.posture,
+            message = when (riskLevel) {
+                RiskLevel.DANGER -> "위험 상태 감지"
+                RiskLevel.EMERGENCY -> "응급 상태 감지"
+                else -> "상태 감지"
+            }
+        )
+
+        txtFirebaseState.text = "Firebase 상태: riskLogs 호출 완료"
+    }
+
+    private fun uploadLastStatus(
+        bleConnected: Boolean,
+        appSessionActive: Boolean
+    ) {
+        val sensorData = lastSensorData ?: return
+
+        FirebaseStatusUploader.uploadCurrentStatus(
+            workerId = sensorData.id,
+            deviceName = bleManager.connectedDeviceName,
+            temp = sensorData.temp,
+            hr = sensorData.hr,
+            env = sensorData.env,
+            hum = sensorData.hum.toDouble(),
+            posture = sensorData.posture,
+            riskLevel = lastRiskLevel.label,
+            riskCommand = lastRiskCommand,
+            bleConnected = bleConnected,
+            appSessionActive = appSessionActive
+        )
+    }
+
+    private fun updateSensorUI(sensorData: SensorData, riskLevel: RiskLevel) {
         val display = """
-            ID : ${sensorData.id}
-            체온 : ${sensorData.temp}
-            심박수 : ${sensorData.hr}
-            환경온도 : ${sensorData.env}
-            습도 : ${sensorData.hum}
-            자세 : ${sensorData.posture}
-            위험도 : ${riskLevel.label}
+            workerId: ${sensorData.id}
+            TEMP 피부 온도: ${sensorData.temp}
+            HR 심박수: ${sensorData.hr}
+            ENV 주변 온도: ${sensorData.env}
+            HUM 습도: ${sensorData.hum}
+            POSTURE 자세: ${sensorData.posture}
+            위험 단계: ${riskLevel.label}
         """.trimIndent()
 
         runOnUiThread {
             txtData.text = display
+            txtLastUpdate.text = "마지막 업데이트: ${formatNow()}"
         }
     }
 
     private fun updateRiskUI(riskLevel: RiskLevel) {
         runOnUiThread {
-            txtRiskState.text = "상태 : ${riskLevel.label}"
+            txtRiskState.text = "상태: ${riskLevel.label}"
 
             val color = when (riskLevel) {
                 RiskLevel.SAFE -> "#2E7D32"
@@ -661,262 +427,107 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateCommandUI(command: String) {
+        runOnUiThread {
+            txtRiskCommand.text = "ESP32 명령: $command"
+        }
+    }
+
     private fun showParseError(rawData: String) {
-        Log.w(TAG, "showParseError called. rawData=$rawData")
+        Log.w(TAG, "Sensor parse failed. rawData=$rawData")
 
         runOnUiThread {
             txtData.text = """
                 데이터 파싱 오류
-                
+
                 수신 원본:
                 $rawData
             """.trimIndent()
-
-            txtRiskState.text = "상태 : 오류"
+            txtRiskState.text = "상태: 오류"
             txtRiskState.setBackgroundColor(Color.parseColor("#777777"))
+            txtFirebaseState.text = "Firebase 상태: 파싱 실패로 업로드 안 함"
         }
     }
 
-    private fun sendRiskCommandToEsp32(command: String) {
-        if (lastSentRiskCommand == command) {
-            Log.d(TAG, "BLE write skipped. Duplicate command=$command")
-            return
-        }
+    private fun clearScanList() {
+        foundDeviceList.clear()
+        deviceInfoList.clear()
+        deviceAdapter.notifyDataSetChanged()
+    }
 
-        if (!isBleConnected || !isServiceDiscovered) {
-            Log.w(
-                TAG,
-                "BLE write skipped. BLE not ready. connected=$isBleConnected, serviceDiscovered=$isServiceDiscovered"
-            )
-            return
-        }
+    private fun generateFakeSensorData(): String {
+        val fakeSamples = listOf(
+            "ID:0001,TEMP:36.5,HR:82,ENV:28.5,HUM:55,POSTURE:NORMAL",
+            "ID:0001,TEMP:37.6,HR:105,ENV:31.5,HUM:72,POSTURE:NORMAL",
+            "ID:0001,TEMP:38.1,HR:125,ENV:34.2,HUM:81,POSTURE:WARNING",
+            "ID:0001,TEMP:37.8,HR:130,ENV:35.5,HUM:85,POSTURE:FALL",
+            "ID:0001,TEMP:38.5,HR:140,ENV:36.0,HUM:88,POSTURE:EMERGENCY"
+        )
+        return fakeSamples.random()
+    }
 
-        val gatt = bluetoothGatt ?: return
-
+    private fun startForegroundService() {
         if (!BlePermissionHelper.hasConnectPermission(this)) {
-            Log.e(TAG, "BLE write failed. Missing BLUETOOTH_CONNECT permission")
+            Log.w(TAG, "Foreground service start skipped. BLUETOOTH_CONNECT permission is missing.")
             return
         }
 
-        val targetService = gatt.getService(BleConstants.TARGET_SERVICE_UUID) ?: return
+        val intent = Intent(this, SmartShieldForegroundService::class.java).apply {
+            action = SmartShieldForegroundService.ACTION_START
+        }
 
-        val controlCharacteristic =
-            targetService.getCharacteristic(BleConstants.CONTROL_CHARACTERISTIC_UUID) ?: return
-
-        val sendData = command.toByteArray(StandardCharsets.UTF_8)
-
-        val writeStarted: Boolean =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                try {
-                    val result = gatt.writeCharacteristic(
-                        controlCharacteristic,
-                        sendData,
-                        BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                    )
-
-                    result == BluetoothStatusCodes.SUCCESS
-                } catch (e: SecurityException) {
-                    Log.e(TAG, "writeCharacteristic failed by permission", e)
-                    false
-                }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ContextCompat.startForegroundService(this, intent)
             } else {
-                try {
-                    @Suppress("DEPRECATION")
-                    controlCharacteristic.value = sendData
-
-                    @Suppress("DEPRECATION")
-                    gatt.writeCharacteristic(controlCharacteristic)
-                } catch (e: SecurityException) {
-                    Log.e(TAG, "writeCharacteristic legacy failed by permission", e)
-                    false
-                }
+                startService(intent)
             }
-
-        if (writeStarted) {
-            lastSentRiskCommand = command
-            Log.d(TAG, "BLE write started successfully. command=$command")
-        } else {
-            Log.e(TAG, "BLE write failed to start. command=$command")
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "Foreground service start failed", e)
         }
     }
 
-    private fun startReconnect() {
-        val device = lastConnectedDevice
+    private fun stopForegroundService() {
+        val intent = Intent(this, SmartShieldForegroundService::class.java).apply {
+            action = SmartShieldForegroundService.ACTION_STOP
+        }
+        try {
+            startService(intent)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "Foreground service stop failed", e)
+        }
+    }
 
-        if (device == null) {
-            Log.w(TAG, "Reconnect skipped. lastConnectedDevice is null")
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             return
         }
 
-        if (isReconnecting) {
-            Log.d(TAG, "Reconnect already running")
-            return
-        }
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
 
-        isReconnecting = true
-        reconnectStartTime = System.currentTimeMillis()
-
-        Log.w(TAG, "Reconnect started")
-
-        handler.post(reconnectRunnable)
-    }
-
-    private fun stopReconnect() {
-        if (!isReconnecting) return
-
-        isReconnecting = false
-        handler.removeCallbacks(reconnectRunnable)
-
-        Log.d(TAG, "Reconnect stopped")
-    }
-
-    private val reconnectRunnable = object : Runnable {
-        override fun run() {
-            if (!isReconnecting) return
-
-            val elapsed = System.currentTimeMillis() - reconnectStartTime
-
-            if (elapsed >= reconnectMaxDurationMs) {
-                Log.e(TAG, "Reconnect failed. Max duration reached.")
-
-                isReconnecting = false
-                appSessionActive = false
-
-                runOnUiThread {
-                    txtBleState.text = "재연결 실패 - 세션 종료"
-                    txtConnectedDevice.text = "연결 장치 : 없음"
-                }
-
-                resetBleStateFlags()
-                stopOfflineChecker()
-                return
-            }
-
-            val device = lastConnectedDevice
-
-            if (device == null) {
-                Log.e(TAG, "Reconnect failed. Device is null.")
-                isReconnecting = false
-                return
-            }
-
-            if (!BlePermissionHelper.hasConnectPermission(this@MainActivity)) {
-                Log.e(TAG, "Reconnect failed. Missing BLUETOOTH_CONNECT permission.")
-                isReconnecting = false
-                return
-            }
-
-            Log.d(TAG, "Trying reconnect... elapsed=${elapsed / 1000}s")
-
-            try {
-                bluetoothGatt?.close()
-                bluetoothGatt = null
-                bluetoothGatt = device.connectGatt(this@MainActivity, false, gattCallback)
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Reconnect connectGatt failed by permission", e)
-            }
-
-            handler.postDelayed(this, reconnectIntervalMs)
+        if (!granted) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                REQUEST_NOTIFICATION_PERMISSION
+            )
         }
     }
 
-    private fun startOfflineChecker() {
-        if (isOfflineCheckerRunning) return
-
-        isOfflineCheckerRunning = true
-        lastDataReceivedTime = System.currentTimeMillis()
-
-        Log.d(TAG, "Offline checker started")
-
-        handler.post(offlineCheckRunnable)
-    }
-
-    private fun stopOfflineChecker() {
-        if (!isOfflineCheckerRunning) return
-
-        isOfflineCheckerRunning = false
-        handler.removeCallbacks(offlineCheckRunnable)
-
-        Log.d(TAG, "Offline checker stopped")
-    }
-
-    private val offlineCheckRunnable = object : Runnable {
-        override fun run() {
-            if (!isOfflineCheckerRunning) return
-
-            checkOfflineState()
-
-            handler.postDelayed(this, 1000L)
-        }
-    }
-
-    private fun checkOfflineState() {
-        if (!isBleConnected) return
-
-        val elapsed = System.currentTimeMillis() - lastDataReceivedTime
-
-        when {
-            elapsed >= offlineTimeoutMs -> {
-                runOnUiThread {
-                    txtBleState.text = "데이터 오프라인"
-                }
-
-                Log.w(TAG, "Data offline. elapsed=${elapsed / 1000}s")
-            }
-
-            elapsed >= unstableTimeoutMs -> {
-                runOnUiThread {
-                    txtBleState.text = "데이터 수신 불안정"
-                }
-
-                Log.w(TAG, "Data unstable. elapsed=${elapsed / 1000}s")
-            }
-
-            else -> {
-                if (isNotifyReady) {
-                    runOnUiThread {
-                        txtBleState.text = "데이터 수신 중"
-                    }
-                }
-            }
-        }
-    }
-
-    private fun resetBleStateFlags() {
-        isBleConnected = false
-        isServiceDiscovered = false
-        isNotifyReady = false
-
-        lastSentRiskCommand = null
-        lastAlertRiskLevel = null
-        lastDataReceivedTime = 0L
-
-        Log.d(TAG, "BLE state flags reset")
+    private fun formatNow(): String {
+        return SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.KOREA).format(Date())
     }
 
     override fun onDestroy() {
         super.onDestroy()
 
-        Log.d(TAG, "onDestroy called. Closing BLE resources.")
-
-        stopBleScan()
-        stopReconnect()
-        stopOfflineChecker()
-
-        bluetoothGatt?.let { gatt ->
-            try {
-                if (BlePermissionHelper.hasConnectPermission(this)) {
-                    gatt.close()
-                    Log.d(TAG, "BluetoothGatt closed")
-                }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "BluetoothGatt close failed by permission", e)
-            }
-        }
-
-        bluetoothGatt = null
-        resetBleStateFlags()
-        lastConnectedDevice = null
+        appSessionActive = false
+        uploadLastStatus(bleConnected = false, appSessionActive = false)
+        bleManager.release()
+        stopForegroundService()
     }
 
     override fun onRequestPermissionsResult(
@@ -926,16 +537,21 @@ class MainActivity : AppCompatActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
-        if (requestCode == BleConstants.REQUEST_BLE_PERMISSION) {
-            val isGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        when (requestCode) {
+            BleConstants.REQUEST_BLE_PERMISSION -> {
+                val isGranted = grantResults.isNotEmpty() &&
+                    grantResults.all { it == PackageManager.PERMISSION_GRANTED }
 
-            val message = if (isGranted) {
-                "BLE 권한이 허용되었습니다."
-            } else {
-                "BLE 권한이 필요합니다."
+                Toast.makeText(
+                    this,
+                    if (isGranted) "BLE 권한이 허용되었습니다." else "BLE 권한이 필요합니다.",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
 
-            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            REQUEST_NOTIFICATION_PERMISSION -> {
+                Log.d(TAG, "Notification permission result=${grantResults.toList()}")
+            }
         }
     }
 }

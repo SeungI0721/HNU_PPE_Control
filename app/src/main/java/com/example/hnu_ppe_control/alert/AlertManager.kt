@@ -10,56 +10,62 @@ import com.example.hnu_ppe_control.data.RiskLevel
 class AlertManager(
     private val context: Context
 ) {
-    private val vibrator =
-        context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+    private val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
 
-    private var isWarningShowing = false
+    private var showingRiskLevel: RiskLevel? = null
 
     fun handleRisk(riskLevel: RiskLevel) {
         when (riskLevel) {
+            RiskLevel.SAFE, RiskLevel.ERROR -> {
+                showingRiskLevel = null
+            }
+
+            RiskLevel.CAUTION -> {
+                showWarning(
+                    riskLevel = riskLevel,
+                    title = "주의 알림",
+                    message = "작업자 상태가 주의 단계입니다.\n수분 섭취와 휴식을 권장합니다.",
+                    vibrationTime = 300L
+                )
+            }
+
             RiskLevel.DANGER -> {
                 showWarning(
+                    riskLevel = riskLevel,
                     title = "위험 알림",
-                    message = "열사병 위험이 감지되었습니다.\n즉시 휴식하세요.",
-                    vibrationTime = 700
+                    message = "위험 상태가 감지되었습니다.\n즉시 작업을 멈추고 안전한 곳에서 휴식하세요.",
+                    vibrationTime = 700L
                 )
             }
 
             RiskLevel.EMERGENCY -> {
                 showWarning(
+                    riskLevel = riskLevel,
                     title = "응급 알림",
-                    message = "응급 상태가 감지되었습니다.\n즉시 작업을 중단하세요.",
-                    vibrationTime = 1200
+                    message = "응급 상태가 감지되었습니다.\n즉시 주변에 도움을 요청하고 작업을 중단하세요.",
+                    vibrationTime = 1200L
                 )
-            }
-
-            RiskLevel.SAFE,
-            RiskLevel.CAUTION,
-            RiskLevel.ERROR -> {
-                // 정상, 주의, 오류 상태에서는 팝업 없음
             }
         }
     }
 
     private fun showWarning(
+        riskLevel: RiskLevel,
         title: String,
         message: String,
         vibrationTime: Long
     ) {
-        // 이미 팝업이 떠 있으면 새 팝업을 띄우지 않음
-        if (isWarningShowing) {
+        if (showingRiskLevel == riskLevel) {
             return
         }
 
-        isWarningShowing = true
+        showingRiskLevel = riskLevel
         vibrate(vibrationTime)
 
         AlertDialog.Builder(context)
             .setTitle(title)
             .setMessage(message)
-            .setCancelable(false)
             .setPositiveButton("확인") { dialog, _ ->
-                isWarningShowing = false
                 dialog.dismiss()
             }
             .show()

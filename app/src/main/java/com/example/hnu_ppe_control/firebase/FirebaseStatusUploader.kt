@@ -24,11 +24,10 @@ object FirebaseStatusUploader {
         appSessionActive: Boolean
     ) {
         if (workerId.isBlank()) {
-            Log.e(TAG, "Upload canceled: workerId is blank")
+            Log.e(TAG, "currentStatus upload FAILED. workerId is blank")
             return
         }
 
-        // Firebase 네트워크 연결 강제 활성화
         FirebaseDatabase.getInstance().goOnline()
 
         val ref = database.getReference("workers")
@@ -50,16 +49,65 @@ object FirebaseStatusUploader {
             "updatedAt" to System.currentTimeMillis()
         )
 
-        Log.d(TAG, "Uploading to path: workers/$workerId/currentStatus")
-        Log.d(TAG, "Data: $data")
+        Log.d(TAG, "currentStatus upload START path=workers/$workerId/currentStatus data=$data")
 
         ref.setValue(data) { error: DatabaseError?, _ ->
             if (error == null) {
-                Log.d(TAG, "Upload SUCCESS: workers/$workerId/currentStatus")
+                Log.d(TAG, "currentStatus upload SUCCESS")
             } else {
                 Log.e(
                     TAG,
-                    "Upload FAILED: code=${error.code}, message=${error.message}, details=${error.details}"
+                    "currentStatus upload FAILED. code=${error.code}, message=${error.message}, details=${error.details}"
+                )
+            }
+        }
+    }
+
+    fun uploadRiskLog(
+        workerId: String,
+        riskLevel: String,
+        riskCommand: String,
+        temp: Double,
+        hr: Int,
+        env: Double,
+        hum: Double,
+        posture: String,
+        message: String
+    ) {
+        if (workerId.isBlank()) {
+            Log.e(TAG, "riskLog upload FAILED. workerId is blank")
+            return
+        }
+
+        FirebaseDatabase.getInstance().goOnline()
+
+        val ref = database.getReference("workers")
+            .child(workerId)
+            .child("riskLogs")
+            .push()
+
+        val data = mapOf(
+            "workerId" to workerId,
+            "riskLevel" to riskLevel,
+            "riskCommand" to riskCommand,
+            "temp" to temp,
+            "hr" to hr,
+            "env" to env,
+            "hum" to hum,
+            "posture" to posture,
+            "message" to message,
+            "createdAt" to System.currentTimeMillis()
+        )
+
+        Log.d(TAG, "riskLog upload START path=workers/$workerId/riskLogs data=$data")
+
+        ref.setValue(data) { error: DatabaseError?, _ ->
+            if (error == null) {
+                Log.d(TAG, "riskLog upload SUCCESS")
+            } else {
+                Log.e(
+                    TAG,
+                    "riskLog upload FAILED. code=${error.code}, message=${error.message}, details=${error.details}"
                 )
             }
         }

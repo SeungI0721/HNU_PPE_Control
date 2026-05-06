@@ -2,6 +2,7 @@ package com.example.hnu_ppe_control.ble
 
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.ActivityCompat
@@ -27,10 +28,10 @@ object BlePermissionHelper {
         }
     }
 
-    fun hasScanPermission(activity: Activity): Boolean {
+    fun hasScanPermission(context: Context): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ActivityCompat.checkSelfPermission(
-                activity,
+            ContextCompat.checkSelfPermission(
+                context,
                 Manifest.permission.BLUETOOTH_SCAN
             ) == PackageManager.PERMISSION_GRANTED
         } else {
@@ -38,10 +39,10 @@ object BlePermissionHelper {
         }
     }
 
-    fun hasConnectPermission(activity: Activity): Boolean {
+    fun hasConnectPermission(context: Context): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ActivityCompat.checkSelfPermission(
-                activity,
+            ContextCompat.checkSelfPermission(
+                context,
                 Manifest.permission.BLUETOOTH_CONNECT
             ) == PackageManager.PERMISSION_GRANTED
         } else {
