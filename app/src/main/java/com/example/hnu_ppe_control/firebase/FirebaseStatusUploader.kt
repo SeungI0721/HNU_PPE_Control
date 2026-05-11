@@ -38,12 +38,11 @@ object FirebaseStatusUploader {
             .child(workerId)
             .child("currentStatus")
 
-        val data = mapOf(
+        val data = mutableMapOf<String, Any>(
             "workerId" to workerId,
             "deviceName" to deviceName,
             "temp" to temp,
             "hr" to hr,
-            "spo2" to spo2,
             "env" to env,
             "hum" to hum,
             "lux" to lux,
@@ -55,6 +54,7 @@ object FirebaseStatusUploader {
             "appSessionActive" to appSessionActive,
             "updatedAt" to System.currentTimeMillis()
         )
+        spo2?.let { data["spo2"] = it }
 
         Log.d(TAG, "currentStatus upload START path=workers/$workerId/currentStatus data=$data")
 
@@ -96,13 +96,12 @@ object FirebaseStatusUploader {
             .child("riskLogs")
             .push()
 
-        val data = mapOf(
+        val data = mutableMapOf<String, Any>(
             "workerId" to workerId,
             "riskLevel" to riskLevel,
             "riskCommand" to riskCommand,
             "temp" to temp,
             "hr" to hr,
-            "spo2" to spo2,
             "env" to env,
             "hum" to hum,
             "lux" to lux,
@@ -111,6 +110,7 @@ object FirebaseStatusUploader {
             "message" to message,
             "createdAt" to System.currentTimeMillis()
         )
+        spo2?.let { data["spo2"] = it }
 
         Log.d(TAG, "riskLog upload START path=workers/$workerId/riskLogs data=$data")
 
